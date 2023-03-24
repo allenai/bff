@@ -1,0 +1,16 @@
+[package]
+name = "bff"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+clap = { version = "4.1.11", features = ["derive"] }
+flate2 = { version = "1.0", features = ["zlib-ng"], default-features = false }
+serde_json = "1.0"
+unicode-segmentation = "1.7"
+memmap = "0.7"
+rand = "0.8.4"
+ahash = { version = "0.8.1", features = ["runtime-rng"] }
+byteorder = "1"
