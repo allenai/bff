@@ -1,14 +1,11 @@
 #![feature(atomic_from_mut)]
 
-mod ngrams;
-
 use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
 use std::io;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::hash::{BuildHasher, Hash, Hasher};
-use std::ptr::hash;
 use clap::Parser;
 use flate2::read::GzDecoder;
 use serde_json;
