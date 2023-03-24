@@ -288,8 +288,10 @@ fn main() {
                 }
             }
 
-            data["text"] = serde_json::Value::String(output_paragraphs);
-            println!("{}", serde_json::to_string(&data).unwrap());
+            if !output_paragraphs.is_empty() {
+                data["text"] = serde_json::Value::String(output_paragraphs);
+                println!("{}", serde_json::to_string(&data).unwrap());
+            }
         }
     }
 }
