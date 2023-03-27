@@ -1,11 +1,10 @@
-#![feature(atomic_from_mut)]
-
 use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
 use std::io;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, BufWriter};
 use std::path::PathBuf;
 use std::hash::{BuildHasher, Hash, Hasher};
+use std::mem::size_of;
 use clap::Parser;
 use flate2::read::GzDecoder;
 use serde_json;
@@ -13,8 +12,8 @@ use unicode_segmentation::UnicodeSegmentation;
 use rand::Rng;
 use ahash::RandomState;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use std::sync::atomic::{AtomicU8, Ordering};
-use memmap::MmapMut;
+use std::sync::atomic::{AtomicU32, Ordering};
+use trim_in_place::TrimInPlace;
 
 
 #[derive(Parser, Debug)]
@@ -56,6 +55,11 @@ struct Args {
     #[arg(long, default_value_t = true)]
     update_bloom_filter: bool,
 
+    /// The number of threads to use for processing.
+    /// If this is 0, the number of threads is automatically determined.
+    #[arg(long, default_value_t = 0)]
+    threads: usize,
+
     #[arg(index = 1)]
     input: Vec<PathBuf>,
 }
@@ -72,12 +76,15 @@ fn tokenize(s: &str) -> impl Iterator<Item = &str> {
 }
 
 struct BloomFilter {
-    file: File,
-    mmap: MmapMut,
+    bits: Vec<AtomicU32>,
+    hash_builder_seeds: Vec<[u64; 4]>, // RandomState does not store its seeds, so we have to store them ourselves.
     hash_builders: Vec<RandomState>
 }
 
 impl BloomFilter {
+    const MAGIC: u32 = 0x81F0F117;
+    const VERSION: u32 = 1;
+
     fn optimal_number_of_hashers(size_in_bytes: usize, expected_elements: usize) -> usize {
         let expected_elements = expected_elements as f64;
         let size_in_bits = (size_in_bytes * 8) as f64;
@@ -85,28 +92,9 @@ impl BloomFilter {
         k.ceil() as usize
     }
 
-    const MAGIC: u32 = 0x81F0F117;
-    const VERSION: u32 = 1;
-
-    fn header_size(num_hashers: usize) -> usize {
-        4 + // magic
-        4 + // version
-        8 + // num_hashers
-        num_hashers * 4 * 8  // random state for each hasher
-    }
-
-    fn new(path: &PathBuf, size_in_bytes: usize, num_hashers: usize) -> io::Result<Self> {
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(path)?;
-        let header_size = Self::header_size(num_hashers);
-
-        file.write_u32::<LittleEndian>(Self::MAGIC)?;
-        file.write_u32::<LittleEndian>(Self::VERSION)?;
-        file.write_u64::<LittleEndian>(num_hashers as u64)?;
+    fn new(size_in_bytes: usize, num_hashers: usize) -> Self {
         let mut rng = rand::thread_rng();
+        let mut hash_builder_seeds = Vec::with_capacity(num_hashers);
         let mut hash_builders = Vec::with_capacity(num_hashers);
         for _ in 0..num_hashers {
             let seeds = rng.gen::<[u64; 4]>();
@@ -115,57 +103,88 @@ impl BloomFilter {
                 seeds[1],
                 seeds[2],
                 seeds[3]));
-            for seed in seeds {
-                file.write_u64::<LittleEndian>(seed)?;
-            }
+            hash_builder_seeds.push(seeds);
         }
 
-        file.set_len((header_size + size_in_bytes) as u64)?;
-        let mmap = unsafe {
-            memmap::MmapOptions::new().offset(header_size as u64).map_mut(&file)
-        }?;
+        let mut bits = Vec::new();
+        let number_of_u32 = size_in_bytes / size_of::<AtomicU32>();
+        bits.reserve_exact(number_of_u32);
+        for _ in 0..number_of_u32 {
+            bits.push(AtomicU32::new(0));
+        }
 
-        Ok(Self { file, mmap, hash_builders })
+        Self { bits, hash_builder_seeds, hash_builders }
     }
 
-    fn open(path: &PathBuf, write: bool) -> io::Result<Self> {
+    fn from_file(path: &PathBuf) -> io::Result<Self> {
         let mut file = OpenOptions::new()
             .read(true)
-            .write(write)
+            .write(false)
             .create(false)
             .open(path)?;
+        let mut stream = BufReader::new(&mut file);
 
-        let magic: u32 = file.read_u32::<LittleEndian>()?;
+        let magic: u32 = stream.read_u32::<LittleEndian>()?;
         if magic != Self::MAGIC {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid magic"));
         }
 
-        let version: u32 = file.read_u32::<LittleEndian>()?;
+        let version: u32 = stream.read_u32::<LittleEndian>()?;
         if version != Self::VERSION {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid version"));
         }
 
-        let num_hashers: u64 = file.read_u64::<LittleEndian>()?;
+        let num_hashers: u32 = stream.read_u32::<LittleEndian>()?;
+        let mut hash_builder_seeds = Vec::with_capacity(num_hashers as usize);
         let mut hash_builders = Vec::with_capacity(num_hashers as usize);
         for _ in 0..num_hashers {
             let seeds = [
-                file.read_u64::<LittleEndian>()?,
-                file.read_u64::<LittleEndian>()?,
-                file.read_u64::<LittleEndian>()?,
-                file.read_u64::<LittleEndian>()?,
+                stream.read_u64::<LittleEndian>()?,
+                stream.read_u64::<LittleEndian>()?,
+                stream.read_u64::<LittleEndian>()?,
+                stream.read_u64::<LittleEndian>()?,
             ];
             hash_builders.push(RandomState::with_seeds(
                 seeds[0],
                 seeds[1],
                 seeds[2],
                 seeds[3]));
+            hash_builder_seeds.push(seeds);
         }
 
-        let header_size = Self::header_size(num_hashers as usize);
-        let mmap = unsafe {
-            memmap::MmapOptions::new().offset(header_size as u64).map_mut(&file)
-        }?;
-        Ok(Self { file, mmap, hash_builders })
+        let numer_of_elements = stream.read_u64::<LittleEndian>()?;
+        let mut bits = Vec::new();
+        bits.reserve_exact(numer_of_elements as usize);
+        for _ in 0..numer_of_elements {
+            bits.push(AtomicU32::new(stream.read_u32::<LittleEndian>()?));
+        }
+
+        Ok(Self { bits, hash_builder_seeds, hash_builders })
+    }
+
+    fn write_to_file(&self, path: &PathBuf) -> io::Result<()> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(path)?;
+        let mut stream = BufWriter::new(&file);
+
+        stream.write_u32::<LittleEndian>(Self::MAGIC)?;
+        stream.write_u32::<LittleEndian>(Self::VERSION)?;
+        stream.write_u32::<LittleEndian>(self.hash_builder_seeds.len() as u32)?;
+        for hash_builder_seed in &self.hash_builder_seeds {
+            for seed in hash_builder_seed {
+                stream.write_u64::<LittleEndian>(*seed)?;
+            }
+        }
+
+        stream.write_u64::<LittleEndian>(self.bits.len() as u64)?;
+        for bit in &self.bits {
+            stream.write_u32::<LittleEndian>(bit.load(Ordering::Relaxed))?;
+        }
+
+        Ok(())
     }
 
     fn hashes(&self, s: &VecDeque<&str>) -> Vec<u64> {
@@ -178,13 +197,10 @@ impl BloomFilter {
 
     fn insert_hashes(&mut self, hashes: &Vec<u64>) {
         for hash in hashes {
-            let byte = hash % (self.mmap.len() as u64);
-            let bit = hash % 8;
-            unsafe {
-                let byte = AtomicU8::from_mut(
-                    self.mmap.get_unchecked_mut(byte as usize));
-                byte.fetch_or(1 << bit, Ordering::Relaxed);
-            }
+            let hash = *hash as usize;
+            let index = hash / 32 % self.bits.len();
+            let bit = hash % 32;
+            self.bits[index].fetch_or(1 << bit, Ordering::Relaxed);
         }
     }
 
@@ -193,23 +209,20 @@ impl BloomFilter {
         self.insert_hashes(&hashes);
     }
 
-    fn contains_hashes(&mut self, hashes: &Vec<u64>) -> bool {
+    fn contains_hashes(&self, hashes: &Vec<u64>) -> bool {
         for hash in hashes {
-            let byte = hash % (self.mmap.len() as u64);
-            let bit = hash % 8;
-            unsafe {
-                let byte = AtomicU8::from_mut(
-                    self.mmap.get_unchecked_mut(byte as usize));
-                if byte.load(Ordering::Relaxed) & (1 << bit) == 0 {
-                    return false;
-                }
+            let hash = *hash as usize;
+            let index = hash / 32 % self.bits.len();
+            let bit = hash % 32;
+            if self.bits[index].load(Ordering::Relaxed) & (1 << bit) == 0 {
+                return false;
             }
         }
 
         return true;
     }
 
-    fn contains(&mut self, s: &VecDeque<&str>) -> bool {
+    fn contains(&self, s: &VecDeque<&str>) -> bool {
         let hashes = self.hashes(s);
         self.contains_hashes(&hashes)
     }
@@ -219,15 +232,12 @@ fn main() {
     let args = Args::parse();
 
     let mut bloom_filter = if args.bloom_filter_file.exists() {
-        BloomFilter::open(&args.bloom_filter_file, true).unwrap()
+        BloomFilter::from_file(&args.bloom_filter_file).unwrap()
     } else {
         let num_hashers = BloomFilter::optimal_number_of_hashers(
             args.bloom_filter_size,
             args.expected_ngram_count);
-        BloomFilter::new(
-            &args.bloom_filter_file,
-            args.bloom_filter_size,
-            num_hashers).unwrap()
+        BloomFilter::new(args.bloom_filter_size, num_hashers)
     };
 
     for input in args.input {
@@ -288,10 +298,15 @@ fn main() {
                 }
             }
 
+            output_paragraphs.trim_in_place();
             if !output_paragraphs.is_empty() {
                 data["text"] = serde_json::Value::String(output_paragraphs);
                 println!("{}", serde_json::to_string(&data).unwrap());
             }
         }
+    }
+
+    if args.update_bloom_filter {
+        bloom_filter.write_to_file(&args.bloom_filter_file).unwrap();
     }
 }
