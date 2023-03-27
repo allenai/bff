@@ -261,6 +261,7 @@ fn process_file(
         read(false).
         write(true).
         create(true).
+        truncate(true).
         open(output_file)?;
     let mut writer = BufWriter::with_capacity(
         1024 * 1024,
