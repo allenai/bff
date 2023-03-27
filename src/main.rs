@@ -336,10 +336,11 @@ fn main() {
         args.threads
     };
 
-    println!("Loading bloom filter from {:?}...", args.bloom_filter_file);
     let bloom_filter = if args.bloom_filter_file.exists() {
+        println!("Loading bloom filter from {:?}...", args.bloom_filter_file);
         BloomFilter::from_file(&args.bloom_filter_file).unwrap()
     } else {
+        println!("Creating new bloom filter...");
         let num_hashers = BloomFilter::optimal_number_of_hashers(
             args.bloom_filter_size,
             args.expected_ngram_count);
