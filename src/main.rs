@@ -44,7 +44,7 @@ struct Args {
 
     /// The largest ngram size to consider. Paragraphs are deduplicated based on the number of
     /// ngrams of this size that are already present in the bloom filter.
-    #[arg(long, default_value_t = 20)]
+    #[arg(long, default_value_t = 13)]
     max_ngram_size: usize,
 
     /// If this fraction of ngrams of the max ngram size are already present in the bloom filter,
