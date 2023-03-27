@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::fs::OpenOptions;
 use std::io;
-use std::io::{BufRead, BufReader, BufWriter};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::mem::size_of;
@@ -13,7 +13,7 @@ use serde_json;
 use unicode_segmentation::UnicodeSegmentation;
 use rand::Rng;
 use ahash::RandomState;
-use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use byteorder::{LittleEndian, NativeEndian, ReadBytesExt, WriteBytesExt};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread::{available_parallelism};
 use flate2::Compression;
@@ -164,11 +164,11 @@ impl BloomFilter {
             hash_builder_seeds.push(seeds);
         }
 
-        let numer_of_elements = stream.read_u64::<LittleEndian>()?;
+        let number_of_elements = stream.read_u64::<LittleEndian>()?;
         let mut bits = Vec::new();
-        bits.reserve_exact(numer_of_elements as usize);
-        for _ in 0..numer_of_elements {
-            bits.push(AtomicU32::new(stream.read_u32::<LittleEndian>()?));
+        bits.reserve_exact(number_of_elements as usize);
+        for _ in 0..number_of_elements {
+            bits.push(AtomicU32::new(stream.read_u32::<NativeEndian>()?));
         }
 
         Ok(Self { bits, hash_builder_seeds, hash_builders })
@@ -192,9 +192,12 @@ impl BloomFilter {
         }
 
         stream.write_u64::<LittleEndian>(self.bits.len() as u64)?;
-        for bit in &self.bits {
-            stream.write_u32::<LittleEndian>(bit.load(Ordering::Relaxed))?;
-        }
+        unsafe {
+            let bytes: &[u8] = std::slice::from_raw_parts(
+                self.bits.as_ptr() as *const u8,
+                self.bits.len() * size_of::<AtomicU32>());
+            stream.write_all(bytes)?;
+        };
 
         Ok(())
     }
