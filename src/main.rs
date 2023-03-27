@@ -28,12 +28,12 @@ struct Args {
 
     /// The size of the bloom filter in bytes. If the filter already exists, this parameter is
     /// ignored.
-    #[arg(long, default_value_t = 1024 * 1024 * 1024)]
+    #[arg(long)]
     bloom_filter_size: usize,
 
     /// The number of expected ngrams. This is used to calculate the optimal number of hashers.
     /// If the filter already exists, this parameter is ignored.
-    #[arg(long, default_value_t = 1000000000)]
+    #[arg(long)]
     expected_ngram_count: usize,
 
     /// The smallest ngram size to consider. Paragraphs that have fewer than this number of tokens
