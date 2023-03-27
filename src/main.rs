@@ -1,18 +1,23 @@
 use std::collections::VecDeque;
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io;
 use std::io::{BufRead, BufReader, BufWriter};
 use std::path::PathBuf;
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::mem::size_of;
+use std::sync::Arc;
 use clap::Parser;
 use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
 use serde_json;
 use unicode_segmentation::UnicodeSegmentation;
 use rand::Rng;
 use ahash::RandomState;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::thread::{available_parallelism};
+use flate2::Compression;
+use threadpool::ThreadPool;
 use trim_in_place::TrimInPlace;
 
 
@@ -31,7 +36,7 @@ struct Args {
     #[arg(long, default_value_t = 1000000000)]
     expected_ngram_count: usize,
 
-    /// The smallest ngram size to consider. Paragraphs that have less than this number of tokens
+    /// The smallest ngram size to consider. Paragraphs that have fewer than this number of tokens
     /// are not deduplicated and always kept. These ngrams are never added to the bloom filter.
     /// Note that this value only matters if the paragraph has fewer tokens than the max ngram size.
     #[arg(long, default_value_t = 3)]
@@ -51,17 +56,24 @@ struct Args {
     filtering_threshold: f64,
 
     /// Whether or not to update the bloom filter. If this is false, the filter is not updated, but
-    /// the input is still deduplicated based on the filter.
+    /// the input is still deduplicated based on the filter. Default is true.
     #[arg(long, default_value_t = true)]
     update_bloom_filter: bool,
 
     /// The number of threads to use for processing.
     /// If this is 0, the number of threads is automatically determined.
-    #[arg(long, default_value_t = 0)]
+    #[arg(long, short = 't', default_value_t = 0)]
     threads: usize,
 
+    /// Input files. These are expected to be gzip compressed newline-delimited JSON files with a
+    /// "text" field.
     #[arg(index = 1)]
-    input: Vec<PathBuf>,
+    inputs: Vec<PathBuf>,
+
+    /// Output directory. The output files will have the same name as the input files, but be placed
+    /// in this directory.
+    #[arg(long, short = 'o')]
+    output_directory: PathBuf,
 }
 
 fn tokenize(s: &str) -> impl Iterator<Item = &str> {
@@ -195,7 +207,7 @@ impl BloomFilter {
         }).collect()
     }
 
-    fn insert_hashes(&mut self, hashes: &Vec<u64>) {
+    fn insert_hashes(&self, hashes: &Vec<u64>) {
         for hash in hashes {
             let hash = *hash as usize;
             let index = hash / 32 % self.bits.len();
@@ -204,7 +216,7 @@ impl BloomFilter {
         }
     }
 
-    fn insert(&mut self, s: &VecDeque<&str>) {
+    fn insert(&self, s: &VecDeque<&str>) {
         let hashes = self.hashes(s);
         self.insert_hashes(&hashes);
     }
@@ -228,10 +240,104 @@ impl BloomFilter {
     }
 }
 
+fn process_file(
+    input_file: &PathBuf,
+    output_file: &PathBuf,
+    bloom_filter: Arc<BloomFilter>,
+    max_ngram_size: usize,
+    update_bloom_filter: bool,
+    filtering_threshold: f64,
+) -> Result <(), io::Error> {
+    let input_file = OpenOptions::new().
+        read(true).
+        write(false).
+        create(false).
+        open(input_file)?;
+    let reader = BufReader::with_capacity(
+        1024 * 1024,
+        GzDecoder::new(input_file));
+
+    let output_file = OpenOptions::new().
+        read(false).
+        write(true).
+        create(true).
+        open(output_file)?;
+    let mut writer = BufWriter::with_capacity(
+        1024 * 1024,
+        GzEncoder::new(output_file, Compression::default()));
+
+    for line in reader.lines() {
+        let line = line.unwrap();
+        let mut data: serde_json::Value = serde_json::from_str(&line).unwrap();
+        let text = data["text"].as_str().unwrap();
+        let paragraphs = text.split("\n");
+        let mut output_paragraphs = String::new();
+
+        for paragraph in paragraphs {
+            // calculate hashes for the paragraph
+            let mut hashes: Vec<Vec<u64>> = Vec::new();
+            let mut ngram: VecDeque<&str> = VecDeque::with_capacity(max_ngram_size);
+            for token in tokenize(paragraph) {
+                if ngram.len() >= max_ngram_size {
+                    hashes.push(bloom_filter.hashes(&ngram));
+                    ngram.pop_front();
+                }
+                ngram.push_back(token);
+            }
+            if !ngram.is_empty() && ngram.len() < max_ngram_size {
+                if update_bloom_filter {
+                    hashes.push(bloom_filter.hashes(&ngram));
+                }
+            }
+
+            if filtering_threshold <= 0.0 {
+                // If we're just priming the filter, just do it right here without checking whether
+                // the ngrams are in the filter.
+                if update_bloom_filter {
+                    for ngram in hashes {
+                        bloom_filter.insert_hashes(&ngram);
+                    }
+                }
+            } else {
+                // calculate how many ngrams are in the bloom filter
+                let contained_ngrams = hashes.iter().filter(|ngram| {
+                    bloom_filter.contains_hashes(ngram)
+                }).count();
+                let number_of_ngrams = hashes.len();
+
+                // produce output
+                if contained_ngrams as f64 / number_of_ngrams as f64 <= filtering_threshold {
+                    output_paragraphs.push_str(paragraph);
+                    output_paragraphs.push('\n');
+                    if update_bloom_filter {
+                        for ngram in hashes {
+                            bloom_filter.insert_hashes(&ngram);
+                        }
+                    }
+                }
+            }
+        }
+
+        output_paragraphs.trim_in_place();
+        if !output_paragraphs.is_empty() {
+            data["text"] = serde_json::Value::String(output_paragraphs);
+            serde_json::to_writer(&mut writer, &data)?;
+        }
+    }
+
+    Ok(())
+}
+
 fn main() {
     let args = Args::parse();
+    let threads = if args.threads == 0 {
+        available_parallelism().unwrap().get()
+    } else {
+        args.threads
+    };
 
-    let mut bloom_filter = if args.bloom_filter_file.exists() {
+    println!("Loading bloom filter from {:?}...", args.bloom_filter_file);
+    let bloom_filter = if args.bloom_filter_file.exists() {
         BloomFilter::from_file(&args.bloom_filter_file).unwrap()
     } else {
         let num_hashers = BloomFilter::optimal_number_of_hashers(
@@ -239,74 +345,34 @@ fn main() {
             args.expected_ngram_count);
         BloomFilter::new(args.bloom_filter_size, num_hashers)
     };
+    let bloom_filter = Arc::new(bloom_filter);
+    println!(
+        "Bloom filter loaded. ({} hashers)",
+        bloom_filter.hash_builders.len());
 
-    for input in args.input {
-        let file = File::open(input).unwrap();
-        let reader = BufReader::with_capacity(
-            1024 * 1024,
-            GzDecoder::new(file));
+    let threadpool = ThreadPool::new(threads);
+    for input in args.inputs {
+        println!("Processing {:?}...", input);
+        let mut output = args.output_directory.clone();
+        output.push(&input.file_name().unwrap());
+        let bloom_filter = bloom_filter.clone();
 
-        for line in reader.lines() {
-            let line = line.unwrap();
-            let mut data: serde_json::Value = serde_json::from_str(&line).unwrap();
-            let text = data["text"].as_str().unwrap();
-            let paragraphs = text.split("\n");
-            let mut output_paragraphs = String::new();
-
-            for paragraph in paragraphs {
-                // calculate hashes for the paragraph
-                let mut hashes: Vec<Vec<u64>> = Vec::new();
-                let mut ngram: VecDeque<&str> = VecDeque::with_capacity(args.max_ngram_size);
-                for token in tokenize(paragraph) {
-                    if ngram.len() >= args.max_ngram_size {
-                        hashes.push(bloom_filter.hashes(&ngram));
-                        ngram.pop_front();
-                    }
-                    ngram.push_back(token);
-                }
-                if !ngram.is_empty() && ngram.len() < args.max_ngram_size {
-                    if args.update_bloom_filter {
-                        hashes.push(bloom_filter.hashes(&ngram));
-                    }
-                }
-
-                if args.filtering_threshold <= 0.0 {
-                    // If we're just priming the filter, just do it right here without checking whether
-                    // the ngrams are in the filter.
-                    if args.update_bloom_filter {
-                        for ngram in hashes {
-                            bloom_filter.insert_hashes(&ngram);
-                        }
-                    }
-                } else {
-                    // calculate how many ngrams are in the bloom filter
-                    let contained_ngrams = hashes.iter().filter(|ngram| {
-                        bloom_filter.contains_hashes(ngram)
-                    }).count();
-                    let number_of_ngrams = hashes.len();
-
-                    // produce output
-                    if contained_ngrams as f64 / number_of_ngrams as f64 <= args.filtering_threshold {
-                        output_paragraphs.push_str(paragraph);
-                        output_paragraphs.push('\n');
-                        if args.update_bloom_filter {
-                            for ngram in hashes {
-                                bloom_filter.insert_hashes(&ngram);
-                            }
-                        }
-                    }
-                }
-            }
-
-            output_paragraphs.trim_in_place();
-            if !output_paragraphs.is_empty() {
-                data["text"] = serde_json::Value::String(output_paragraphs);
-                println!("{}", serde_json::to_string(&data).unwrap());
-            }
-        }
+        threadpool.execute(move || {
+            process_file(
+                &input,
+                &output,
+                bloom_filter,
+                args.max_ngram_size,
+                args.update_bloom_filter,
+                args.filtering_threshold,
+            ).unwrap();
+        });
     }
+    threadpool.join();
 
     if args.update_bloom_filter {
+        println!("Writing bloom filter to {:?}...", args.bloom_filter_file);
         bloom_filter.write_to_file(&args.bloom_filter_file).unwrap();
+        println!("Bloom filter written.");
     }
 }
