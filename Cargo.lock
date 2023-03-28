@@ -31,7 +31,6 @@ dependencies = [
  "rand",
  "serde_json",
  "threadpool",
- "trim-in-place",
  "unicode-segmentation",
 ]
 
@@ -415,12 +414,6 @@ checksum = "d050e60b33d41c19108b32cea32164033a9013fe3b46cbd4457559bfbf77afaa"
 dependencies = [
  "num_cpus",
 ]
-
-[[package]]
-name = "trim-in-place"
-version = "0.1.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "343e926fc669bc8cde4fa3129ab681c63671bae288b1f1081ceee6d9d37904fc"
 
 [[package]]
 name = "unicode-ident"

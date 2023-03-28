@@ -17,8 +17,8 @@ use byteorder::{LittleEndian, NativeEndian, ReadBytesExt, WriteBytesExt};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread::{available_parallelism};
 use flate2::Compression;
+use serde_json::Value;
 use threadpool::ThreadPool;
-use trim_in_place::TrimInPlace;
 
 
 #[derive(Parser, Debug)]
@@ -59,6 +59,11 @@ struct Args {
     /// the input is still deduplicated based on the filter. Default is true.
     #[arg(long, default_value_t = true)]
     update_bloom_filter: bool,
+
+    /// If this is true, we keep the input intact, but we add an annotation to each document that
+    /// explains which spans from the text would have been deleted.
+    #[arg(long, default_value_t = false)]
+    annotate_only: bool,
 
     /// The number of threads to use for processing.
     /// If this is 0, the number of threads is automatically determined.
@@ -248,8 +253,10 @@ fn process_file(
     output_file: &PathBuf,
     bloom_filter: Arc<BloomFilter>,
     max_ngram_size: usize,
+    min_ngram_size: usize,
     update_bloom_filter: bool,
     filtering_threshold: f64,
+    annotate_only: bool,
 ) -> Result <(), io::Error> {
     let input_file = OpenOptions::new().
         read(true).
@@ -272,26 +279,33 @@ fn process_file(
 
     for line in reader.lines() {
         let line = line.unwrap();
-        let mut data: serde_json::Value = serde_json::from_str(&line).unwrap();
+        let mut data: Value = serde_json::from_str(&line).unwrap();
         let text = data["text"].as_str().unwrap();
-        let paragraphs = text.split("\n");
-        let mut output_paragraphs = String::new();
+        let mut newlines = Vec::new();
+        newlines.push(0);
+        for i in text.match_indices("\n") {
+            newlines.push(i.0);
+        }
+        newlines.push(text.len());
+        let mut windows_to_remove = Vec::new();
 
-        for paragraph in paragraphs {
+        for paragraph_window in newlines.windows(2) {
+            let paragraph = &text[paragraph_window[0]..paragraph_window[1]];
+
             // calculate hashes for the paragraph
             let mut hashes: Vec<Vec<u64>> = Vec::new();
             let mut ngram: VecDeque<&str> = VecDeque::with_capacity(max_ngram_size);
             for token in tokenize(paragraph) {
+                ngram.push_back(token);
                 if ngram.len() >= max_ngram_size {
                     hashes.push(bloom_filter.hashes(&ngram));
                     ngram.pop_front();
                 }
-                ngram.push_back(token);
             }
-            if !ngram.is_empty() && ngram.len() < max_ngram_size {
-                if update_bloom_filter {
-                    hashes.push(bloom_filter.hashes(&ngram));
-                }
+            // If the paragraph was too short, put in a shorter ngram, so we can dedupe short
+            // paragraphs exactly.
+            if hashes.is_empty() && ngram.len() >= min_ngram_size {
+                hashes.push(bloom_filter.hashes(&ngram));
             }
 
             if filtering_threshold <= 0.0 {
@@ -310,23 +324,32 @@ fn process_file(
                 let number_of_ngrams = hashes.len();
 
                 // produce output
-                if contained_ngrams as f64 / number_of_ngrams as f64 <= filtering_threshold {
-                    output_paragraphs.push_str(paragraph);
-                    output_paragraphs.push('\n');
-                    if update_bloom_filter {
-                        for ngram in hashes {
-                            bloom_filter.insert_hashes(&ngram);
-                        }
+                let too_many_duplicate_ngrams =
+                    contained_ngrams as f64 / number_of_ngrams as f64 > filtering_threshold;
+                if too_many_duplicate_ngrams {
+                    windows_to_remove.push(paragraph_window);
+                } else if update_bloom_filter {
+                    for ngram in hashes {
+                        bloom_filter.insert_hashes(&ngram);
                     }
                 }
             }
         }
 
-        output_paragraphs.trim_in_place();
-        if !output_paragraphs.is_empty() {
-            data["text"] = serde_json::Value::String(output_paragraphs);
-            serde_json::to_writer(&mut writer, &data)?;
+        if annotate_only {
+            data["duplicate_spans"] = serde_json::to_value(windows_to_remove).unwrap();
+        } else {
+            let mut output_paragraphs = String::new();
+            let mut last_end = 0;
+            for paragraph_window in windows_to_remove {
+                output_paragraphs.push_str(&text[last_end..paragraph_window[0]]);
+                last_end = paragraph_window[1];
+            }
+            output_paragraphs.push_str(&text[last_end..]);
+            data["text"] = Value::String(output_paragraphs);
         }
+
+        serde_json::to_writer(&mut writer, &data)?;
     }
 
     Ok(())
@@ -368,8 +391,10 @@ fn main() {
                 &output,
                 bloom_filter,
                 args.max_ngram_size,
+                args.min_ngram_size,
                 args.update_bloom_filter,
                 args.filtering_threshold,
+                args.annotate_only
             ).unwrap();
         });
     }

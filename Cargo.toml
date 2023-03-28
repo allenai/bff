@@ -13,5 +13,4 @@ unicode-segmentation = "1.7"
 rand = "0.8.4"
 ahash = { version = "0.8.1", features = ["runtime-rng"] }
 byteorder = "1"
-trim-in-place = "0.1.7"
 threadpool = "1.8.1"
