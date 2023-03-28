@@ -39,7 +39,7 @@ struct Args {
     /// The smallest ngram size to consider. Paragraphs that have fewer than this number of tokens
     /// are not deduplicated and always kept. These ngrams are never added to the bloom filter.
     /// Note that this value only matters if the paragraph has fewer tokens than the max ngram size.
-    #[arg(long, default_value_t = 3)]
+    #[arg(long, default_value_t = 5)]
     min_ngram_size: usize,
 
     /// The largest ngram size to consider. Paragraphs are deduplicated based on the number of
