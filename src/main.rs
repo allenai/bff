@@ -380,12 +380,12 @@ fn main() {
 
     let threadpool = ThreadPool::new(threads);
     for input in args.inputs {
-        println!("Processing {:?}...", input);
         let mut output = args.output_directory.clone();
         output.push(&input.file_name().unwrap());
         let bloom_filter = bloom_filter.clone();
 
         threadpool.execute(move || {
+            println!("Processing {:?}...", input);
             process_file(
                 &input,
                 &output,
