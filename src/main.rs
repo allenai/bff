@@ -109,6 +109,36 @@ impl BloomFilter {
         k.ceil() as usize
     }
 
+    fn prob_of_false_positive(size_in_bytes: usize, expected_elements: usize, num_hashers: usize) -> f64 {
+        let k = num_hashers as f64;
+        let m = (size_in_bytes * 8) as f64;
+        let n = expected_elements as f64;
+        (1.0 - (1.0 - (1.0 / m)).powf(k * n)).powf(k)
+    }
+
+    fn suggest_size_in_bytes(expected_elements: usize) -> usize {
+        let mut size_in_bytes = 1024*1024;
+        while size_in_bytes < usize::MAX/2 && Self::prob_of_false_positive(
+            size_in_bytes,
+            expected_elements,
+            Self::optimal_number_of_hashers(size_in_bytes, expected_elements)
+        ) > 0.01 {
+            size_in_bytes *= 2;
+        }
+        size_in_bytes
+    }
+
+    fn my_prob_of_false_positive(&self, expected_elements: usize) -> f64 {
+        Self::prob_of_false_positive(
+            self.size_in_bytes(),
+            expected_elements,
+            self.hash_builders.len())
+    }
+
+    fn size_in_bytes(&self) -> usize {
+        self.bits.len() * size_of::<AtomicU32>()
+    }
+
     fn new(size_in_bytes: usize, num_hashers: usize) -> Self {
         let mut rng = rand::thread_rng();
         let mut hash_builder_seeds = Vec::with_capacity(num_hashers);
@@ -377,6 +407,28 @@ fn main() {
     println!(
         "Bloom filter loaded. ({} hashers)",
         bloom_filter.hash_builders.len());
+
+    let p = bloom_filter.my_prob_of_false_positive(args.expected_ngram_count);
+    if p >= 0.5 {
+        println!(
+            "WARNING: Probability of a false positive after {} elements is {}.",
+            args.expected_ngram_count,
+            p);
+    } else {
+        println!(
+            "Probability of a false positive after {} elements: {}",
+            args.expected_ngram_count,
+            p);
+    }
+
+    let suggested_size =
+        BloomFilter::suggest_size_in_bytes(args.expected_ngram_count);
+    if suggested_size * 2 < bloom_filter.size_in_bytes() {
+        println!(
+            "WARNING: Your bloom filter is more than twice as large as suggested for {} elements. \
+            This is good for accuracy, but it is much slower, and likely not worth the trade-off.",
+            args.expected_ngram_count);
+    }
 
     let threadpool = ThreadPool::new(threads);
     for input in args.inputs {
