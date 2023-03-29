@@ -6,9 +6,9 @@ The big friendly filter 😁
 Getting started
 ---------------
 
-1. Install Rust on your machine. This is a total nightmare and yet rust people are super proud of it.
-   2. `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
-   3. Add `~/.cargo/bin` to your `PATH` environment variable.
+1. Install Rust on your machine.
+    1. `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
+    2. Add `~/.cargo/bin` to your `PATH` environment variable.
 2. Run `cargo build --release`. It places the binary at `target/release/bff`.
 3. Run `./target/release/bff --help` to see the available options.
 
