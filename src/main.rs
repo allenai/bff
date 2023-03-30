@@ -380,6 +380,7 @@ fn process_file(
         }
 
         serde_json::to_writer(&mut writer, &data)?;
+        writer.write_all(b"\n")?;
     }
 
     Ok(())
