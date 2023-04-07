@@ -79,9 +79,15 @@ struct Args {
     /// in this directory.
     #[arg(long, short = 'o')]
     output_directory: PathBuf,
+
+    /// Deduping strategy
+    /// "paragraph": Remove duplicate paragraphs from "text" field
+    /// "url": Drop documents with duplicate "metadata.url" value
+    #[arg(long)]
+    dedupe_by: String,
 }
 
-fn tokenize(s: &str) -> impl Iterator<Item = &str> {
+fn tokenize(s: &str) -> impl Iterator<Item=&str> {
     s.split_word_bounds().filter(|w| {
         for c in w.chars() {
             if !c.is_whitespace() {
@@ -94,8 +100,9 @@ fn tokenize(s: &str) -> impl Iterator<Item = &str> {
 
 struct BloomFilter {
     bits: Vec<AtomicU32>,
-    hash_builder_seeds: Vec<[u64; 4]>, // RandomState does not store its seeds, so we have to store them ourselves.
-    hash_builders: Vec<RandomState>
+    hash_builder_seeds: Vec<[u64; 4]>,
+    // RandomState does not store its seeds, so we have to store them ourselves.
+    hash_builders: Vec<RandomState>,
 }
 
 impl BloomFilter {
@@ -117,11 +124,11 @@ impl BloomFilter {
     }
 
     fn suggest_size_in_bytes(expected_elements: usize) -> usize {
-        let mut size_in_bytes = 1024*1024;
-        while size_in_bytes < usize::MAX/2 && Self::prob_of_false_positive(
+        let mut size_in_bytes = 1024 * 1024;
+        while size_in_bytes < usize::MAX / 2 && Self::prob_of_false_positive(
             size_in_bytes,
             expected_elements,
-            Self::optimal_number_of_hashers(size_in_bytes, expected_elements)
+            Self::optimal_number_of_hashers(size_in_bytes, expected_elements),
         ) > 0.01 {
             size_in_bytes *= 2;
         }
@@ -287,7 +294,8 @@ fn process_file(
     update_bloom_filter: bool,
     filtering_threshold: f64,
     annotate_only: bool,
-) -> Result <(), io::Error> {
+    dedupe_by: String,
+) -> Result<(), io::Error> {
     let input_file = OpenOptions::new().
         read(true).
         write(false).
@@ -310,77 +318,84 @@ fn process_file(
     for line in reader.lines() {
         let line = line.unwrap();
         let mut data: Value = serde_json::from_str(&line).unwrap();
-        let text = data["text"].as_str().unwrap();
-        let mut newlines = Vec::new();
-        newlines.push(0);
-        for i in text.match_indices("\n") {
-            newlines.push(i.0);
-        }
-        newlines.push(text.len());
-        let mut windows_to_remove = Vec::new();
+        if dedupe_by == "paragraphs" {
+            let text = data["text"].as_str().unwrap();
+            let mut newlines = Vec::new();
+            newlines.push(0);
+            for i in text.match_indices("\n") {
+                newlines.push(i.0);
+            }
+            newlines.push(text.len());
+            let mut windows_to_remove = Vec::new();
 
-        for paragraph_window in newlines.windows(2) {
-            let paragraph = &text[paragraph_window[0]..paragraph_window[1]];
+            for paragraph_window in newlines.windows(2) {
+                let paragraph = &text[paragraph_window[0]..paragraph_window[1]];
 
-            // calculate hashes for the paragraph
-            let mut hashes: Vec<Vec<u64>> = Vec::new();
-            let mut ngram: VecDeque<&str> = VecDeque::with_capacity(max_ngram_size);
-            for token in tokenize(paragraph) {
-                ngram.push_back(token);
-                if ngram.len() >= max_ngram_size {
+                // calculate hashes for the paragraph
+                let mut hashes: Vec<Vec<u64>> = Vec::new();
+                let mut ngram: VecDeque<&str> = VecDeque::with_capacity(max_ngram_size);
+                for token in tokenize(paragraph) {
+                    ngram.push_back(token);
+                    if ngram.len() >= max_ngram_size {
+                        hashes.push(bloom_filter.hashes(&ngram));
+                        ngram.pop_front();
+                    }
+                }
+                // If the paragraph was too short, put in a shorter ngram, so we can dedupe short
+                // paragraphs exactly.
+                if hashes.is_empty() && ngram.len() >= min_ngram_size {
                     hashes.push(bloom_filter.hashes(&ngram));
-                    ngram.pop_front();
                 }
-            }
-            // If the paragraph was too short, put in a shorter ngram, so we can dedupe short
-            // paragraphs exactly.
-            if hashes.is_empty() && ngram.len() >= min_ngram_size {
-                hashes.push(bloom_filter.hashes(&ngram));
-            }
 
-            if filtering_threshold <= 0.0 {
-                // If we're just priming the filter, just do it right here without checking whether
-                // the ngrams are in the filter.
-                if update_bloom_filter {
-                    for ngram in hashes {
-                        bloom_filter.insert_hashes(&ngram);
+                if filtering_threshold <= 0.0 {
+                    // If we're just priming the filter, just do it right here without checking whether
+                    // the ngrams are in the filter.
+                    if update_bloom_filter {
+                        for ngram in hashes {
+                            bloom_filter.insert_hashes(&ngram);
+                        }
+                    }
+                } else {
+                    // calculate how many ngrams are in the bloom filter
+                    let contained_ngrams = hashes.iter().filter(|ngram| {
+                        bloom_filter.contains_hashes(ngram)
+                    }).count();
+                    let number_of_ngrams = hashes.len();
+
+                    // produce output
+                    let too_many_duplicate_ngrams =
+                        contained_ngrams as f64 / number_of_ngrams as f64 > filtering_threshold;
+                    if too_many_duplicate_ngrams {
+                        windows_to_remove.push(paragraph_window);
+                    } else if update_bloom_filter {
+                        for ngram in hashes {
+                            bloom_filter.insert_hashes(&ngram);
+                        }
                     }
                 }
+            }
+
+            if annotate_only {
+                data["duplicate_spans"] = serde_json::to_value(windows_to_remove).unwrap();
             } else {
-                // calculate how many ngrams are in the bloom filter
-                let contained_ngrams = hashes.iter().filter(|ngram| {
-                    bloom_filter.contains_hashes(ngram)
-                }).count();
-                let number_of_ngrams = hashes.len();
-
-                // produce output
-                let too_many_duplicate_ngrams =
-                    contained_ngrams as f64 / number_of_ngrams as f64 > filtering_threshold;
-                if too_many_duplicate_ngrams {
-                    windows_to_remove.push(paragraph_window);
-                } else if update_bloom_filter {
-                    for ngram in hashes {
-                        bloom_filter.insert_hashes(&ngram);
-                    }
+                let mut output_paragraphs = String::new();
+                let mut last_end = 0;
+                for paragraph_window in windows_to_remove {
+                    output_paragraphs.push_str(&text[last_end..paragraph_window[0]]);
+                    last_end = paragraph_window[1];
                 }
+                output_paragraphs.push_str(&text[last_end..]);
+                data["text"] = Value::String(output_paragraphs);
+            }
+
+            serde_json::to_writer(&mut writer, &data)?;
+            writer.write_all(b"\n")?;
+        } else if dedupe_by == "url" {
+            if !is_duplicate_url(&data) {
+                serde_json::to_writer(&mut writer, &data)?;
+                writer.write_all(b"\n")?;
             }
         }
-
-        if annotate_only {
-            data["duplicate_spans"] = serde_json::to_value(windows_to_remove).unwrap();
-        } else {
-            let mut output_paragraphs = String::new();
-            let mut last_end = 0;
-            for paragraph_window in windows_to_remove {
-                output_paragraphs.push_str(&text[last_end..paragraph_window[0]]);
-                last_end = paragraph_window[1];
-            }
-            output_paragraphs.push_str(&text[last_end..]);
-            data["text"] = Value::String(output_paragraphs);
-        }
-
-        serde_json::to_writer(&mut writer, &data)?;
-        writer.write_all(b"\n")?;
     }
 
     Ok(())
@@ -447,7 +462,8 @@ fn main() {
                 args.min_ngram_size,
                 args.update_bloom_filter,
                 args.filtering_threshold,
-                args.annotate_only
+                args.annotate_only,
+                args.dedupe_by,
             ).unwrap();
         });
     }
