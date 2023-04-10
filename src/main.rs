@@ -397,7 +397,6 @@ fn process_file(
             let mut should_write = true;
 
             if bloom_filter.contains(&url_ngram) {
-                println!("Skipping duplicate URL: {} in file {}", url, input_path.display());
                 if annotate_only {
                     data["duplicate"] = Value::Bool(true);
                 } else {
