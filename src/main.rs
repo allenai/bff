@@ -294,7 +294,7 @@ fn process_file(
     update_bloom_filter: bool,
     filtering_threshold: f64,
     annotate_only: bool,
-    dedupe_by: String,
+    dedupe_by: &String,
 ) -> Result<(), io::Error> {
     let input_file = OpenOptions::new().
         read(true).
@@ -391,10 +391,30 @@ fn process_file(
             serde_json::to_writer(&mut writer, &data)?;
             writer.write_all(b"\n")?;
         } else if dedupe_by == "url" {
-            if !is_duplicate_url(&data) {
+            let url = data["metadata"]["url"].as_str().unwrap();
+            let mut url_ngram = VecDeque::with_capacity(1);
+            url_ngram.push_back(url);
+            let mut should_write = true;
+
+            if bloom_filter.contains(&url_ngram) {
+                if annotate_only {
+                    data["duplicate"] = Value::Bool(true);
+                } else {
+                    should_write = false;
+                }
+            } else {
+                if update_bloom_filter {
+                    bloom_filter.insert(&url_ngram);
+                }
+            }
+
+            if should_write {
                 serde_json::to_writer(&mut writer, &data)?;
                 writer.write_all(b"\n")?;
             }
+        }
+        else {
+            panic!("Unknown dedupe_by: {}", dedupe_by);
         }
     }
 
@@ -451,6 +471,7 @@ fn main() {
         let mut output = args.output_directory.clone();
         output.push(&input.file_name().unwrap());
         let bloom_filter = bloom_filter.clone();
+        let dedupe_by = args.dedupe_by.clone();
 
         threadpool.execute(move || {
             println!("Processing {:?}...", input);
@@ -463,7 +484,7 @@ fn main() {
                 args.update_bloom_filter,
                 args.filtering_threshold,
                 args.annotate_only,
-                args.dedupe_by,
+                &dedupe_by,
             ).unwrap();
         });
     }
