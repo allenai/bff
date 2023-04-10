@@ -315,7 +315,10 @@ fn process_file(
         1024 * 1024,
         GzEncoder::new(output_file, Compression::default()));
 
+    let mut line_number = 0;
+    let mut lines_written = 0;
     for line in reader.lines() {
+        line_number += 1;
         let line = line.unwrap();
         let mut data: Value = serde_json::from_str(&line).unwrap();
         if dedupe_by == "paragraphs" {
@@ -409,6 +412,7 @@ fn process_file(
             }
 
             if should_write {
+                lines_written += 1;
                 serde_json::to_writer(&mut writer, &data)?;
                 writer.write_all(b"\n")?;
             }
@@ -417,6 +421,8 @@ fn process_file(
             panic!("Unknown dedupe_by: {}", dedupe_by);
         }
     }
+
+    print!("Dropped {} of {} documents", line_number - lines_written, line_number);
 
     Ok(())
 }
