@@ -422,7 +422,7 @@ fn process_file(
         }
     }
 
-    print!("Dropped {} of {} documents", line_number - lines_written, line_number);
+    print!("Dropped {} of {} documents in {}", line_number - lines_written, line_number, input_path.display());
 
     Ok(())
 }
