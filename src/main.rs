@@ -286,8 +286,8 @@ impl BloomFilter {
 }
 
 fn process_file(
-    input_file: &PathBuf,
-    output_file: &PathBuf,
+    input_path: &PathBuf,
+    output_path: &PathBuf,
     bloom_filter: Arc<BloomFilter>,
     max_ngram_size: usize,
     min_ngram_size: usize,
@@ -300,7 +300,7 @@ fn process_file(
         read(true).
         write(false).
         create(false).
-        open(input_file)?;
+        open(input_path)?;
     let reader = BufReader::with_capacity(
         1024 * 1024,
         GzDecoder::new(input_file));
@@ -310,7 +310,7 @@ fn process_file(
         write(true).
         create(true).
         truncate(true).
-        open(output_file)?;
+        open(output_path)?;
     let mut writer = BufWriter::with_capacity(
         1024 * 1024,
         GzEncoder::new(output_file, Compression::default()));
@@ -397,6 +397,7 @@ fn process_file(
             let mut should_write = true;
 
             if bloom_filter.contains(&url_ngram) {
+                println!("Skipping duplicate URL: {} in file {}", url, input_path.display());
                 if annotate_only {
                     data["duplicate"] = Value::Bool(true);
                 } else {
