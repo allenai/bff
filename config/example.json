@@ -1,0 +1,22 @@
+{
+  "streams": [
+    {
+      "name": "cc_en_head",
+      "documents": [
+        "pretraining-data/sources/common-crawl/v0/documents/mined_split/2023-06/*/en_head.json.gz"
+      ],
+      "output": {
+        "path": "/data/test",
+        "max_shard_size": "4G"
+      }
+    }
+  ],
+  "bloom_filter": {
+    "file": "bloom_filter.bin",
+    "size_in_bytes": 0,
+    "read_only": false,
+    "estimated_doc_count": 3000,
+    "desired_false_positive_rate": 0.0001
+  },
+  "processes": 32
+}

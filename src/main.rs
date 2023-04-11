@@ -2,14 +2,19 @@ use std::collections::VecDeque;
 use std::fs::OpenOptions;
 use std::io;
 use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::fs::File;
 use std::path::PathBuf;
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::mem::size_of;
 use std::sync::Arc;
+use std::env;
+use std::process;
 use clap::Parser;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
+use serde::{Deserialize, Serialize};
 use serde_json;
+use aws_sdk_s3::{Client as S3Client, config::Region};
 use unicode_segmentation::UnicodeSegmentation;
 use rand::Rng;
 use ahash::RandomState;
@@ -19,73 +24,6 @@ use std::thread::{available_parallelism};
 use flate2::Compression;
 use serde_json::Value;
 use threadpool::ThreadPool;
-
-
-#[derive(Parser, Debug)]
-struct Args {
-    #[arg(long)]
-    bloom_filter_file: PathBuf,
-
-    /// The size of the bloom filter in bytes. If the filter already exists, this parameter is
-    /// ignored.
-    #[arg(long)]
-    bloom_filter_size: usize,
-
-    /// The number of expected ngrams. This is used to calculate the optimal number of hashers.
-    /// If the filter already exists, this parameter is ignored.
-    #[arg(long)]
-    expected_ngram_count: usize,
-
-    /// The smallest ngram size to consider. Paragraphs that have fewer than this number of tokens
-    /// are not deduplicated and always kept. These ngrams are never added to the bloom filter.
-    /// Note that this value only matters if the paragraph has fewer tokens than the max ngram size.
-    #[arg(long, default_value_t = 5)]
-    min_ngram_size: usize,
-
-    /// The largest ngram size to consider. Paragraphs are deduplicated based on the number of
-    /// ngrams of this size that are already present in the bloom filter.
-    #[arg(long, default_value_t = 13)]
-    max_ngram_size: usize,
-
-    /// If this fraction of ngrams of the max ngram size are already present in the bloom filter,
-    /// the paragraph is considered a duplicate and is discarded.
-    /// Set this to 0 to never produce any output. This is useful when you want to prime the filter
-    /// with some content that should be considered duplicates, without deduplicating that content
-    /// itself.
-    #[arg(long, default_value_t = 0.80)]
-    filtering_threshold: f64,
-
-    /// Whether or not to update the bloom filter. If this is false, the filter is not updated, but
-    /// the input is still deduplicated based on the filter. Default is true.
-    #[arg(long, default_value_t = true)]
-    update_bloom_filter: bool,
-
-    /// If this is true, we keep the input intact, but we add an annotation to each document that
-    /// explains which spans from the text would have been deleted.
-    #[arg(long, default_value_t = false)]
-    annotate_only: bool,
-
-    /// The number of threads to use for processing.
-    /// If this is 0, the number of threads is automatically determined.
-    #[arg(long, short = 't', default_value_t = 0)]
-    threads: usize,
-
-    /// Input files. These are expected to be gzip compressed newline-delimited JSON files with a
-    /// "text" field.
-    #[arg(index = 1)]
-    inputs: Vec<PathBuf>,
-
-    /// Output directory. The output files will have the same name as the input files, but be placed
-    /// in this directory.
-    #[arg(long, short = 'o')]
-    output_directory: PathBuf,
-
-    /// Deduping strategy
-    /// "paragraph": Remove duplicate paragraphs from "text" field
-    /// "url": Drop documents with duplicate "metadata.url" value
-    #[arg(long)]
-    dedupe_by: String,
-}
 
 fn tokenize(s: &str) -> impl Iterator<Item=&str> {
     s.split_word_bounds().filter(|w| {
@@ -123,13 +61,13 @@ impl BloomFilter {
         (1.0 - (1.0 - (1.0 / m)).powf(k * n)).powf(k)
     }
 
-    fn suggest_size_in_bytes(expected_elements: usize) -> usize {
+    fn suggest_size_in_bytes(expected_elements: usize, desired_false_positive_rate: f64) -> usize {
         let mut size_in_bytes = 1024 * 1024;
         while size_in_bytes < usize::MAX / 2 && Self::prob_of_false_positive(
             size_in_bytes,
             expected_elements,
             Self::optimal_number_of_hashers(size_in_bytes, expected_elements),
-        ) > 0.01 {
+        ) > desired_false_positive_rate {
             size_in_bytes *= 2;
         }
         size_in_bytes
@@ -416,8 +354,7 @@ fn process_file(
                 serde_json::to_writer(&mut writer, &data)?;
                 writer.write_all(b"\n")?;
             }
-        }
-        else {
+        } else {
             panic!("Unknown dedupe_by: {}", dedupe_by);
         }
     }
@@ -427,79 +364,145 @@ fn process_file(
     Ok(())
 }
 
+#[derive(Serialize, Deserialize)]
+struct BloomFilterConfig {
+    file: String,
+    size_in_bytes: usize,
+    read_only: bool,
+    estimated_doc_count: usize,
+    desired_false_positive_rate: f64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StreamConfig {
+    name: String,
+    documents: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Config {
+    streams: Vec<StreamConfig>,
+    bloom_filter: BloomFilterConfig,
+    processes: usize,
+}
+
+struct Shard {
+    name: String,
+    inputs: Vec<String>,
+    output: String,
+}
+
 fn main() {
+    if env::var("RUST_LOG").is_err() {
+        env::set_var("RUST_LOG", "info")
+    }
     env_logger::init();
-    let args = Args::parse();
-    let threads = if args.threads == 0 {
-        available_parallelism().unwrap().get()
-    } else {
-        args.threads
-    };
+    let args: Vec<String> = env::args().collect();
+    if args.len() != 2 {
+        log::error!("Usage: {} <config file>", args[0]);
+        process::exit(1);
+    }
+    let config: Config = serde_json::from_reader(File::open(&args[1]).unwrap()).unwrap();
+    let bloom_filter_file = PathBuf::from(&config.bloom_filter.file);
 
-    let bloom_filter = if args.bloom_filter_file.exists() {
-        log::info!("Loading bloom filter from {:?}...", args.bloom_filter_file);
-        BloomFilter::from_file(&args.bloom_filter_file).unwrap()
-    } else {
-        log::info!("Creating new bloom filter...");
-        let num_hashers = BloomFilter::optimal_number_of_hashers(
-            args.bloom_filter_size,
-            args.expected_ngram_count);
-        BloomFilter::new(args.bloom_filter_size, num_hashers)
-    };
+    let bloom_filter =
+        if bloom_filter_file.exists() {
+            log::info!("Loading bloom filter from {:?}...", config.bloom_filter.file);
+            BloomFilter::from_file(&bloom_filter_file).unwrap()
+        } else {
+            log::info!("Creating new bloom filter...");
+            let mut bloom_filter_size: usize = config.bloom_filter.size_in_bytes;
+            if bloom_filter_size == 0 {
+                bloom_filter_size = BloomFilter::suggest_size_in_bytes(config.bloom_filter.estimated_doc_count, config.bloom_filter.desired_false_positive_rate);
+                log::info!("Creating bloom filter with size {} bytes to achieve false positive rate {}", bloom_filter_size, config.bloom_filter.desired_false_positive_rate);
+            }
+            let num_hashers = BloomFilter::optimal_number_of_hashers(
+                bloom_filter_size,
+                config.bloom_filter.estimated_doc_count);
+            let p = BloomFilter::prob_of_false_positive(bloom_filter_size, config.bloom_filter.estimated_doc_count, num_hashers);
+            log::info!("Bloom filter will have {} hashers and a false positive probability of {}.", num_hashers, p);
+            BloomFilter::new(bloom_filter_size, num_hashers)
+        };
+
     let bloom_filter = Arc::new(bloom_filter);
-    log::info!(
-        "Bloom filter loaded. ({} hashers)",
-        bloom_filter.hash_builders.len());
 
-    let p = bloom_filter.my_prob_of_false_positive(args.expected_ngram_count);
-    if p >= 0.5 {
-        log::warn!(
-            "WARNING: Probability of a false positive after {} elements is {}.",
-            args.expected_ngram_count,
-            p);
-    } else {
-        log::info!(
-            "Probability of a false positive after {} elements: {}",
-            args.expected_ngram_count,
-            p);
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build().unwrap();
+    let aws_config = rt.block_on(aws_config::from_env().region(Region::new("us-east-1")).load());
+    let s3_client = S3Client::new(&aws_config);
+
+    let mut shards: Vec<Shard> = Vec::new();
+    for stream_config in config.streams {
+        let mut inputs: Vec<String> = Vec::new();
+        for pattern in stream_config.documents {
+            let index = pattern.chars().position(|c| c == '*').unwrap();
+            let prefix = pattern[..index].to_string();
+            let suffix = pattern[index + 2..].to_string();
+            let mut has_more = true;
+            let mut token: Option<String> = None;
+            while has_more {
+                let mut resp =
+                    if token.is_some() {
+                        rt.block_on(s3_client.list_objects_v2()
+                            .bucket("ai2-llm")
+                            .prefix(&prefix)
+                            .delimiter("/")
+                            .continuation_token(token.unwrap())
+                            .send()).unwrap()
+                    } else {
+                        rt.block_on(s3_client.list_objects_v2()
+                            .bucket("ai2-llm")
+                            .prefix(&prefix)
+                            .delimiter("/")
+                            .send()).unwrap()
+                    };
+                for sub_folder in resp.common_prefixes().unwrap_or_default() {
+                    let full_prefix = prefix.to_owned() + sub_folder.prefix().unwrap();
+                    let full_path = full_prefix + &suffix;
+                    inputs.push(full_path);
+                }
+                has_more = resp.next_continuation_token().is_some();
+                token = resp.next_continuation_token().map(String::from);
+                has_more = token.is_some();
+            }
+            // let sub_folders = block_on(s3_client.list_objects_v2(ListObjectsV2Request {
+            //     bucket: "ai2-llm".to_string(),
+            //     prefix: Some(prefix),
+            //     ..Default::default()
+            // })).unwrap().contents.unwrap();
+        }
+        //shards.push(Shard { name: stream_config.name, inputs, output: stream_config.output });
     }
 
-    let suggested_size =
-        BloomFilter::suggest_size_in_bytes(args.expected_ngram_count);
-    if suggested_size * 2 < bloom_filter.size_in_bytes() {
-        log::warn!(
-            "WARNING: Your bloom filter is more than twice as large as suggested for {} elements. \
-            This is good for accuracy, but it is much slower, and likely not worth the trade-off.",
-            args.expected_ngram_count);
-    }
+    // let threadpool = ThreadPool::new(threads);
+    // for input in args.inputs {
+    //     let mut output = args.output_directory.clone();
+    //     output.push(&input.file_name().unwrap());
+    //     let bloom_filter = bloom_filter.clone();
+    //     let dedupe_by = args.dedupe_by.clone();
+    //
+    //     threadpool.execute(move || {
+    //         log::info!("Processing {:?}...", input);
+    //         process_file(
+    //             &input,
+    //             &output,
+    //             bloom_filter,
+    //             args.max_ngram_size,
+    //             args.min_ngram_size,
+    //             args.update_bloom_filter,
+    //             args.filtering_threshold,
+    //             args.annotate_only,
+    //             &dedupe_by,
+    //         ).unwrap();
+    //     });
+    // }
+    // threadpool.join();
 
-    let threadpool = ThreadPool::new(threads);
-    for input in args.inputs {
-        let mut output = args.output_directory.clone();
-        output.push(&input.file_name().unwrap());
-        let bloom_filter = bloom_filter.clone();
-        let dedupe_by = args.dedupe_by.clone();
-
-        threadpool.execute(move || {
-            log::info!("Processing {:?}...", input);
-            process_file(
-                &input,
-                &output,
-                bloom_filter,
-                args.max_ngram_size,
-                args.min_ngram_size,
-                args.update_bloom_filter,
-                args.filtering_threshold,
-                args.annotate_only,
-                &dedupe_by,
-            ).unwrap();
-        });
-    }
-    threadpool.join();
-
-    if args.update_bloom_filter {
-        log::info!("Writing bloom filter to {:?}...", args.bloom_filter_file);
-        bloom_filter.write_to_file(&args.bloom_filter_file).unwrap();
+    if !config.bloom_filter.read_only {
+        log::info!("Writing bloom filter to {:?}...", config.bloom_filter.file);
+        bloom_filter.write_to_file(&bloom_filter_file).unwrap();
         log::info!("Bloom filter written.");
     }
     log::info!("Done!");
