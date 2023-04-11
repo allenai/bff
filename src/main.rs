@@ -422,12 +422,13 @@ fn process_file(
         }
     }
 
-    println!("Dropped {} of {} documents in {}", line_number - lines_written, line_number, input_path.display());
+    log::info!("Dropped {} of {} documents in {}", line_number - lines_written, line_number, input_path.display());
 
     Ok(())
 }
 
 fn main() {
+    env_logger::init();
     let args = Args::parse();
     let threads = if args.threads == 0 {
         available_parallelism().unwrap().get()
@@ -436,28 +437,28 @@ fn main() {
     };
 
     let bloom_filter = if args.bloom_filter_file.exists() {
-        println!("Loading bloom filter from {:?}...", args.bloom_filter_file);
+        log::info!("Loading bloom filter from {:?}...", args.bloom_filter_file);
         BloomFilter::from_file(&args.bloom_filter_file).unwrap()
     } else {
-        println!("Creating new bloom filter...");
+        log::info!("Creating new bloom filter...");
         let num_hashers = BloomFilter::optimal_number_of_hashers(
             args.bloom_filter_size,
             args.expected_ngram_count);
         BloomFilter::new(args.bloom_filter_size, num_hashers)
     };
     let bloom_filter = Arc::new(bloom_filter);
-    println!(
+    log::info!(
         "Bloom filter loaded. ({} hashers)",
         bloom_filter.hash_builders.len());
 
     let p = bloom_filter.my_prob_of_false_positive(args.expected_ngram_count);
     if p >= 0.5 {
-        println!(
+        log::warn!(
             "WARNING: Probability of a false positive after {} elements is {}.",
             args.expected_ngram_count,
             p);
     } else {
-        println!(
+        log::info!(
             "Probability of a false positive after {} elements: {}",
             args.expected_ngram_count,
             p);
@@ -466,7 +467,7 @@ fn main() {
     let suggested_size =
         BloomFilter::suggest_size_in_bytes(args.expected_ngram_count);
     if suggested_size * 2 < bloom_filter.size_in_bytes() {
-        println!(
+        log::warn!(
             "WARNING: Your bloom filter is more than twice as large as suggested for {} elements. \
             This is good for accuracy, but it is much slower, and likely not worth the trade-off.",
             args.expected_ngram_count);
@@ -480,7 +481,7 @@ fn main() {
         let dedupe_by = args.dedupe_by.clone();
 
         threadpool.execute(move || {
-            println!("Processing {:?}...", input);
+            log::info!("Processing {:?}...", input);
             process_file(
                 &input,
                 &output,
@@ -497,8 +498,9 @@ fn main() {
     threadpool.join();
 
     if args.update_bloom_filter {
-        println!("Writing bloom filter to {:?}...", args.bloom_filter_file);
+        log::info!("Writing bloom filter to {:?}...", args.bloom_filter_file);
         bloom_filter.write_to_file(&args.bloom_filter_file).unwrap();
-        println!("Bloom filter written.");
+        log::info!("Bloom filter written.");
     }
+    log::info!("Done!");
 }
