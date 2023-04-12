@@ -17,6 +17,7 @@ use serde_json;
 use serde_json::Value;
 use threadpool::ThreadPool;
 use aws_sdk_s3::{Client as S3Client, config::Region};
+use aws_sdk_s3::primitives::ByteStream;
 use tokio::fs::{File as TokioFile};
 
 use config::Config;
@@ -45,24 +46,45 @@ async fn download_from_s3(
     Ok(())
 }
 
+async fn upload_to_s3(
+    s3_client: &S3Client,
+    bucket: &str,
+    key: &str,
+    path: &Path,
+) -> Result<(), io::Error> {
+    s3_client
+        .put_object()
+        .bucket(bucket)
+        .key(key)
+        .body(ByteStream::from_path(path).await?)
+        .send()
+        .await
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
+    Ok(())
+}
+
 fn process_shard(
     shard: Shard,
     bloom_filter: Arc<BloomFilter>,
     update_bloom_filter: bool,
     annotate_only: bool,
+    input_work_dir: &String,
+    output_work_dir: &String,
 ) -> Result<(), io::Error> {
-    std::fs::create_dir_all(Path::new(&shard.output).parent())?;
+    let inputs_dir = Path::new(input_work_dir);
+    let outputs_dir = Path::new(output_work_dir);
 
-    let inputs_cache_dir = Path::new("test-data");
-    std::fs::create_dir_all(inputs_cache_dir)?;
+    let output_path = outputs_dir.join(shard.output.clone());
+    std::fs::create_dir_all(output_path.parent().unwrap())?;
 
-    let tmp_output = shard.output.clone() + ".tmp";
+    let tmp_output_path = outputs_dir.join(shard.output.clone() + ".tmp");
     let output_file = OpenOptions::new().
         read(false).
         write(true).
         create(true).
         truncate(true).
-        open(tmp_output.clone())?;
+        open(tmp_output_path.clone())?;
 
     let mut writer = BufWriter::with_capacity(
         1024 * 1024,
@@ -76,7 +98,7 @@ fn process_shard(
 
     for input_path in shard.inputs {
         log::info!("Merging {} into {}", input_path, shard.output);
-        let tmp_input = inputs_cache_dir.join(Path::new(&input_path));
+        let tmp_input = inputs_dir.join(Path::new(&input_path));
         log::info!("Downloading {} to {}", input_path, tmp_input.display());
         rt.block_on(download_from_s3(
             &s3_client,
@@ -123,10 +145,17 @@ fn process_shard(
             }
         }
         std::fs::remove_file(tmp_input)?;
-        log::info!("Dropped {} of {} documents", line_number - lines_written, line_number);
+        log::info!("Dropped {} of {} documents from {}", line_number - lines_written, line_number, &shard.output);
     }
 
-    std::fs::rename(&tmp_output, &shard.output.clone())?;
+    rt.block_on(upload_to_s3(
+        &s3_client,
+        "ai2-llm",
+        &shard.output,
+        &tmp_output_path,
+    ))?;
+
+    std::fs::rename(&tmp_output_path, &output_path)?;
 
     Ok(())
 }
@@ -150,15 +179,27 @@ fn main() {
 
     let threadpool = ThreadPool::new(config.processes);
     for shard in shards {
+        let output_path = Path::new(&config.work_dir.output.clone()).join(&shard.output);
+        if output_path.exists() {
+            log::info!("Skipping {:?} because it already exists", shard.output);
+            continue;
+        }
+        else {
+            log::info!("Processing {:?}...", output_path)
+        }
         let bloom_filter = bloom_filter.clone();
+        let input_work_dir = config.work_dir.input.clone();
+        let output_work_dir = config.work_dir.output.clone();
 
         threadpool.execute(move || {
             log::info!("Processing {:?}...", shard.output);
             process_shard(
                 shard.clone(),
-                bloom_filter,
+                bloom_filter.clone(),
                 !config.bloom_filter.read_only,
                 false,
+                &input_work_dir,
+                &output_work_dir,
             ).unwrap();
         });
     }

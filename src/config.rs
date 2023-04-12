@@ -25,11 +25,19 @@ pub struct StreamConfig {
     pub output: StreamOutputConfig,
 }
 
+
+#[derive(Serialize, Deserialize)]
+pub struct WorkDirConfig {
+    pub input: String,
+    pub output: String
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct Config {
     pub streams: Vec<StreamConfig>,
     pub bloom_filter: BloomFilterConfig,
     pub processes: usize,
+    pub work_dir: WorkDirConfig,
 }
 
 impl Config {

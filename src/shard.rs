@@ -73,14 +73,9 @@ impl Shard {
                         inputs: shard_inputs.clone(),
                         output: output.clone(),
                     };
-                    if shards.len() == 0 {
-                        log::info!("Adding shard {} with inputs {}", shard.output, shard_inputs.join(", "));
-                        shards.push(shard);
-                        shard_size = 0;
-                        shard_inputs = Vec::new();
-                    } else {
-                        log::warn!("Skipping shard {} for debugging purposes", output);
-                    }
+                    shards.push(shard);
+                    shard_size = 0;
+                    shard_inputs = Vec::new();
                 }
                 shard_inputs.push(input.clone());
             }
