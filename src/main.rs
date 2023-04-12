@@ -386,7 +386,7 @@ fn process_file(
             }
             output_paragraphs.push_str(&text[last_end..]);
             data["text"] = Value::String(output_paragraphs);
-            data["bff_contained_ngram_count"] = serde_json::to_value(total_contained_ngrams).unwrap();
+            data["bff_contained_ngram_count_before_dedupe"] = serde_json::to_value(total_contained_ngrams).unwrap();
         }
 
         serde_json::to_writer(&mut writer, &data)?;
