@@ -6,7 +6,7 @@
         "pretraining-data/sources/common-crawl/v0/documents/mined_split/2023-06/*/en_head.json.gz"
       ],
       "output": {
-        "path": "/data/test",
+        "path": "test-data/output",
         "max_size_in_bytes": 4294967296
       }
     }
