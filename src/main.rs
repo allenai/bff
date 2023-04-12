@@ -65,6 +65,14 @@ struct Args {
     #[arg(long, default_value_t = false)]
     annotate_only: bool,
 
+    /// If you want ngrams to span across paragraph breaks, set this to true.
+    /// This also means that bff will only remove a complete document at a time. When this happens
+    /// the resulting document will be empty. This also means that deduplication within a document
+    /// no longer works. All in all, it might be best to only use this when you're also using
+    /// --annotate-only.
+    #[arg(long, default_value_t = false)]
+    whole_document: bool,
+
     /// The number of threads to use for processing.
     /// If this is 0, the number of threads is automatically determined.
     #[arg(long, short = 't', default_value_t = 0)]
@@ -287,6 +295,7 @@ fn process_file(
     update_bloom_filter: bool,
     filtering_threshold: f64,
     annotate_only: bool,
+    whole_document: bool,
 ) -> Result <(), io::Error> {
     let input_file = OpenOptions::new().
         read(true).
@@ -311,13 +320,20 @@ fn process_file(
         let line = line.unwrap();
         let mut data: Value = serde_json::from_str(&line).unwrap();
         let text = data["text"].as_str().unwrap();
-        let mut newlines = Vec::new();
-        newlines.push(0);
-        for i in text.match_indices("\n") {
-            newlines.push(i.0);
-        }
-        newlines.push(text.len());
+
+        let newlines = if whole_document {
+            vec![0, text.len()]
+        } else {
+            let mut newlines = Vec::new();
+            newlines.push(0);
+            for i in text.match_indices("\n") {
+                newlines.push(i.0);
+            }
+            newlines.push(text.len());
+            newlines
+        };
         let mut windows_to_remove = Vec::new();
+        let mut total_contained_ngrams = 0;
 
         for paragraph_window in newlines.windows(2) {
             let paragraph = &text[paragraph_window[0]..paragraph_window[1]];
@@ -338,36 +354,29 @@ fn process_file(
                 hashes.push(bloom_filter.hashes(&ngram));
             }
 
-            if filtering_threshold <= 0.0 {
-                // If we're just priming the filter, just do it right here without checking whether
-                // the ngrams are in the filter.
-                if update_bloom_filter {
-                    for ngram in hashes {
-                        bloom_filter.insert_hashes(&ngram);
-                    }
-                }
-            } else {
-                // calculate how many ngrams are in the bloom filter
-                let contained_ngrams = hashes.iter().filter(|ngram| {
-                    bloom_filter.contains_hashes(ngram)
-                }).count();
-                let number_of_ngrams = hashes.len();
+            let contained_ngrams = hashes.iter().filter(|ngram| {
+                bloom_filter.contains_hashes(ngram)
+            }).count();
+            total_contained_ngrams += contained_ngrams;
 
-                // produce output
-                let too_many_duplicate_ngrams =
-                    contained_ngrams as f64 / number_of_ngrams as f64 > filtering_threshold;
-                if too_many_duplicate_ngrams {
-                    windows_to_remove.push(paragraph_window);
-                } else if update_bloom_filter {
-                    for ngram in hashes {
-                        bloom_filter.insert_hashes(&ngram);
-                    }
+            // calculate how many ngrams are in the bloom filter
+            let number_of_ngrams = hashes.len();
+
+            // produce output
+            let too_many_duplicate_ngrams =
+                contained_ngrams as f64 / number_of_ngrams as f64 > filtering_threshold;
+            if too_many_duplicate_ngrams {
+                windows_to_remove.push(paragraph_window);
+            } else if update_bloom_filter {
+                for ngram in hashes {
+                    bloom_filter.insert_hashes(&ngram);
                 }
             }
         }
 
         if annotate_only {
-            data["duplicate_spans"] = serde_json::to_value(windows_to_remove).unwrap();
+            data["bff_duplicate_spans"] = serde_json::to_value(windows_to_remove).unwrap();
+            data["bff_contained_ngram_count"] = serde_json::to_value(total_contained_ngrams).unwrap();
         } else {
             let mut output_paragraphs = String::new();
             let mut last_end = 0;
@@ -377,6 +386,7 @@ fn process_file(
             }
             output_paragraphs.push_str(&text[last_end..]);
             data["text"] = Value::String(output_paragraphs);
+            data["bff_contained_ngram_count"] = serde_json::to_value(total_contained_ngrams).unwrap();
         }
 
         serde_json::to_writer(&mut writer, &data)?;
@@ -447,7 +457,8 @@ fn main() {
                 args.min_ngram_size,
                 args.update_bloom_filter,
                 args.filtering_threshold,
-                args.annotate_only
+                args.annotate_only,
+                args.whole_document
             ).unwrap();
         });
     }
