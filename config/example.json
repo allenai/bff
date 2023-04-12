@@ -7,7 +7,7 @@
       ],
       "output": {
         "path": "/data/test",
-        "max_shard_size": "4G"
+        "max_size_in_bytes": 4294967296
       }
     }
   ],

@@ -9,7 +9,6 @@ use std::mem::size_of;
 use std::sync::Arc;
 use std::env;
 use std::process;
-use clap::Parser;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use serde::{Deserialize, Serialize};
@@ -20,10 +19,10 @@ use rand::Rng;
 use ahash::RandomState;
 use byteorder::{LittleEndian, NativeEndian, ReadBytesExt, WriteBytesExt};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::thread::{available_parallelism};
 use flate2::Compression;
 use serde_json::Value;
 use threadpool::ThreadPool;
+use rayon::prelude::*;
 
 fn tokenize(s: &str) -> impl Iterator<Item=&str> {
     s.split_word_bounds().filter(|w| {
@@ -223,115 +222,39 @@ impl BloomFilter {
     }
 }
 
-fn process_file(
-    input_path: &PathBuf,
-    output_path: &PathBuf,
+fn process_shard(
+    shard: Shard,
     bloom_filter: Arc<BloomFilter>,
-    max_ngram_size: usize,
-    min_ngram_size: usize,
     update_bloom_filter: bool,
-    filtering_threshold: f64,
-    annotate_only: bool,
-    dedupe_by: &String,
+    annotate_only: bool
 ) -> Result<(), io::Error> {
-    let input_file = OpenOptions::new().
-        read(true).
-        write(false).
-        create(false).
-        open(input_path)?;
-    let reader = BufReader::with_capacity(
-        1024 * 1024,
-        GzDecoder::new(input_file));
-
     let output_file = OpenOptions::new().
         read(false).
         write(true).
         create(true).
         truncate(true).
-        open(output_path)?;
+        open(shard.output)?;
+
     let mut writer = BufWriter::with_capacity(
         1024 * 1024,
         GzEncoder::new(output_file, Compression::default()));
 
-    let mut line_number = 0;
-    let mut lines_written = 0;
-    for line in reader.lines() {
-        line_number += 1;
-        let line = line.unwrap();
-        let mut data: Value = serde_json::from_str(&line).unwrap();
-        if dedupe_by == "paragraphs" {
-            let text = data["text"].as_str().unwrap();
-            let mut newlines = Vec::new();
-            newlines.push(0);
-            for i in text.match_indices("\n") {
-                newlines.push(i.0);
-            }
-            newlines.push(text.len());
-            let mut windows_to_remove = Vec::new();
+    for input_path in shard.inputs {
+        let input_file = OpenOptions::new().
+            read(true).
+            write(false).
+            create(false).
+            open(input_path)?;
+        let reader = BufReader::with_capacity(
+            1024 * 1024,
+            GzDecoder::new(input_file));
 
-            for paragraph_window in newlines.windows(2) {
-                let paragraph = &text[paragraph_window[0]..paragraph_window[1]];
-
-                // calculate hashes for the paragraph
-                let mut hashes: Vec<Vec<u64>> = Vec::new();
-                let mut ngram: VecDeque<&str> = VecDeque::with_capacity(max_ngram_size);
-                for token in tokenize(paragraph) {
-                    ngram.push_back(token);
-                    if ngram.len() >= max_ngram_size {
-                        hashes.push(bloom_filter.hashes(&ngram));
-                        ngram.pop_front();
-                    }
-                }
-                // If the paragraph was too short, put in a shorter ngram, so we can dedupe short
-                // paragraphs exactly.
-                if hashes.is_empty() && ngram.len() >= min_ngram_size {
-                    hashes.push(bloom_filter.hashes(&ngram));
-                }
-
-                if filtering_threshold <= 0.0 {
-                    // If we're just priming the filter, just do it right here without checking whether
-                    // the ngrams are in the filter.
-                    if update_bloom_filter {
-                        for ngram in hashes {
-                            bloom_filter.insert_hashes(&ngram);
-                        }
-                    }
-                } else {
-                    // calculate how many ngrams are in the bloom filter
-                    let contained_ngrams = hashes.iter().filter(|ngram| {
-                        bloom_filter.contains_hashes(ngram)
-                    }).count();
-                    let number_of_ngrams = hashes.len();
-
-                    // produce output
-                    let too_many_duplicate_ngrams =
-                        contained_ngrams as f64 / number_of_ngrams as f64 > filtering_threshold;
-                    if too_many_duplicate_ngrams {
-                        windows_to_remove.push(paragraph_window);
-                    } else if update_bloom_filter {
-                        for ngram in hashes {
-                            bloom_filter.insert_hashes(&ngram);
-                        }
-                    }
-                }
-            }
-
-            if annotate_only {
-                data["duplicate_spans"] = serde_json::to_value(windows_to_remove).unwrap();
-            } else {
-                let mut output_paragraphs = String::new();
-                let mut last_end = 0;
-                for paragraph_window in windows_to_remove {
-                    output_paragraphs.push_str(&text[last_end..paragraph_window[0]]);
-                    last_end = paragraph_window[1];
-                }
-                output_paragraphs.push_str(&text[last_end..]);
-                data["text"] = Value::String(output_paragraphs);
-            }
-
-            serde_json::to_writer(&mut writer, &data)?;
-            writer.write_all(b"\n")?;
-        } else if dedupe_by == "url" {
+        let mut line_number = 0;
+        let mut lines_written = 0;
+        for line in reader.lines() {
+            line_number += 1;
+            let line = line.unwrap();
+            let mut data: Value = serde_json::from_str(&line).unwrap();
             let url = data["metadata"]["url"].as_str().unwrap();
             let mut url_ngram = VecDeque::with_capacity(1);
             url_ngram.push_back(url);
@@ -354,12 +277,10 @@ fn process_file(
                 serde_json::to_writer(&mut writer, &data)?;
                 writer.write_all(b"\n")?;
             }
-        } else {
-            panic!("Unknown dedupe_by: {}", dedupe_by);
         }
+        log::info!("Dropped {} of {} documents", line_number - lines_written, line_number);
     }
 
-    log::info!("Dropped {} of {} documents in {}", line_number - lines_written, line_number, input_path.display());
 
     Ok(())
 }
@@ -374,9 +295,16 @@ struct BloomFilterConfig {
 }
 
 #[derive(Serialize, Deserialize)]
+struct StreamOutputConfig {
+    path: String,
+    max_size_in_bytes: usize,
+}
+
+#[derive(Serialize, Deserialize)]
 struct StreamConfig {
     name: String,
     documents: Vec<String>,
+    output: StreamOutputConfig,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -386,8 +314,8 @@ struct Config {
     processes: usize,
 }
 
+#[derive(Clone)]
 struct Shard {
-    name: String,
     inputs: Vec<String>,
     output: String,
 }
@@ -435,7 +363,8 @@ fn main() {
 
     let mut shards: Vec<Shard> = Vec::new();
     for stream_config in config.streams {
-        let mut inputs: Vec<String> = Vec::new();
+        log::info!("Computing shards for stream {}...", stream_config.name);
+        let mut stream_inputs: Vec<String> = Vec::new();
         for pattern in stream_config.documents {
             let index = pattern.chars().position(|c| c == '*').unwrap();
             let prefix = pattern[..index].to_string();
@@ -443,7 +372,7 @@ fn main() {
             let mut has_more = true;
             let mut token: Option<String> = None;
             while has_more {
-                let mut resp =
+                let resp =
                     if token.is_some() {
                         rt.block_on(s3_client.list_objects_v2()
                             .bucket("ai2-llm")
@@ -459,46 +388,64 @@ fn main() {
                             .send()).unwrap()
                     };
                 for sub_folder in resp.common_prefixes().unwrap_or_default() {
-                    let full_prefix = prefix.to_owned() + sub_folder.prefix().unwrap();
-                    let full_path = full_prefix + &suffix;
-                    inputs.push(full_path);
+                    let full_path = sub_folder.prefix().unwrap().to_owned() + &suffix;
+                    stream_inputs.push(full_path);
                 }
-                has_more = resp.next_continuation_token().is_some();
                 token = resp.next_continuation_token().map(String::from);
                 has_more = token.is_some();
             }
-            // let sub_folders = block_on(s3_client.list_objects_v2(ListObjectsV2Request {
-            //     bucket: "ai2-llm".to_string(),
-            //     prefix: Some(prefix),
-            //     ..Default::default()
-            // })).unwrap().contents.unwrap();
         }
-        //shards.push(Shard { name: stream_config.name, inputs, output: stream_config.output });
+        stream_inputs.sort();
+        let inputs_with_sizes = stream_inputs.par_iter().map(|input| {
+            let resp = rt.block_on(s3_client.head_object()
+                .bucket("ai2-llm")
+                .key(input)
+                .send()).unwrap();
+            (input.to_string(), resp.content_length as usize)
+        }).collect::<Vec<(String, usize)>>();
+        let mut shard_size = inputs_with_sizes[0].1;
+        let mut shard_inputs: Vec<String> = Vec::new();
+        shard_inputs.push(inputs_with_sizes[0].0.clone());
+        for (input, size) in inputs_with_sizes[1..].iter() {
+            shard_size += size;
+            if shard_size > stream_config.output.max_size_in_bytes {
+                let output = format!("{}/{}-{:04}.json.gz", stream_config.output.path, stream_config.name, shards.len());
+                let shard = Shard {
+                    inputs: shard_inputs.clone(),
+                    output: output.clone(),
+                };
+                shards.push(shard);
+                shard_size = 0;
+                shard_inputs = Vec::new();
+            }
+            shard_inputs.push(input.clone());
+        }
+        if shard_inputs.len() > 0 {
+            let output = format!("{}/{}-{:04}.json.gz", stream_config.output.path, stream_config.name, shards.len());
+            let shard = Shard {
+                inputs: shard_inputs.clone(),
+                output: output.clone(),
+            };
+            shards.push(shard);
+        }
+        log::info!("Splitting {} files for {} into {} shards", stream_inputs.len(), stream_config.name, shards.len());
     }
 
-    // let threadpool = ThreadPool::new(threads);
-    // for input in args.inputs {
-    //     let mut output = args.output_directory.clone();
-    //     output.push(&input.file_name().unwrap());
-    //     let bloom_filter = bloom_filter.clone();
-    //     let dedupe_by = args.dedupe_by.clone();
-    //
-    //     threadpool.execute(move || {
-    //         log::info!("Processing {:?}...", input);
-    //         process_file(
-    //             &input,
-    //             &output,
-    //             bloom_filter,
-    //             args.max_ngram_size,
-    //             args.min_ngram_size,
-    //             args.update_bloom_filter,
-    //             args.filtering_threshold,
-    //             args.annotate_only,
-    //             &dedupe_by,
-    //         ).unwrap();
-    //     });
-    // }
-    // threadpool.join();
+    let threadpool = ThreadPool::new(config.processes);
+    for shard in shards {
+        let bloom_filter = bloom_filter.clone();
+
+        threadpool.execute(move || {
+            log::info!("Processing {:?}...", shard.output);
+            process_shard(
+                shard.clone(),
+                bloom_filter,
+                !config.bloom_filter.read_only,
+                false,
+            ).unwrap();
+        });
+    }
+    threadpool.join();
 
     if !config.bloom_filter.read_only {
         log::info!("Writing bloom filter to {:?}...", config.bloom_filter.file);
