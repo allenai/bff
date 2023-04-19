@@ -65,6 +65,11 @@ struct Args {
     #[arg(long, default_value_t = false)]
     annotate_only: bool,
 
+    /// If this is true, we only write out document id and source, and annotate which spans would
+    /// have been deleted. This produces an attribute file per the llm-data specification.
+    #[arg(long, default_value_t = false)]
+    annotate_attribute_only: bool,
+
     /// If you want ngrams to span across paragraph breaks, set this to true.
     /// This also means that bff will only remove a complete document at a time. When this happens
     /// the resulting document will be empty. This also means that deduplication within a document
@@ -295,6 +300,7 @@ fn process_file(
     update_bloom_filter: bool,
     filtering_threshold: f64,
     annotate_only: bool,
+    annotate_attribute_only: bool,
     whole_document: bool,
 ) -> Result <(), io::Error> {
     let input_file = OpenOptions::new().
@@ -374,7 +380,8 @@ fn process_file(
             }
         }
 
-        if annotate_only {
+        // if annotate_attribute_only or annotate_only, add the annotation to the json
+        if annotate_attribute_only || annotate_only {
             data["bff_duplicate_spans"] = serde_json::to_value(windows_to_remove).unwrap();
             data["bff_contained_ngram_count"] = serde_json::to_value(total_contained_ngrams).unwrap();
         } else {
@@ -387,6 +394,29 @@ fn process_file(
             output_paragraphs.push_str(&text[last_end..]);
             data["text"] = Value::String(output_paragraphs);
             data["bff_contained_ngram_count_before_dedupe"] = serde_json::to_value(total_contained_ngrams).unwrap();
+        }
+
+        if annotate_attribute_only {
+            // Allowed fields
+            let allowed_fields = [
+                "bff_duplicate_spans",
+                "bff_contained_ngram_count",
+                "id",
+                "source",
+            ];
+
+            // Iterate through the keys of the JSON object and remove any field that is not in the allowed_fields list
+            if let Value::Object(ref mut map) = data {
+                let keys_to_remove: Vec<String> = map
+                    .keys()
+                    .filter(|key| !allowed_fields.contains(&key.as_str()))
+                    .map(|key| key.to_owned())
+                    .collect();
+                for key in keys_to_remove {
+                    map.remove(&key);
+                }
+            }
+
         }
 
         serde_json::to_writer(&mut writer, &data)?;
@@ -458,6 +488,7 @@ fn main() {
                 !args.no_update_bloom_filter,
                 args.filtering_threshold,
                 args.annotate_only,
+                args.annotate_attribute_only,
                 args.whole_document
             ).unwrap();
         });
