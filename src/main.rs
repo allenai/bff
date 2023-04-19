@@ -55,10 +55,10 @@ struct Args {
     #[arg(long, default_value_t = 0.80)]
     filtering_threshold: f64,
 
-    /// Whether or not to update the bloom filter. If this is false, the filter is not updated, but
-    /// the input is still deduplicated based on the filter. Default is true.
-    #[arg(long, default_value_t = true)]
-    update_bloom_filter: bool,
+    /// Whether or not to update the bloom filter. If this is true, the filter is not updated, but
+    /// the input is still deduplicated based on the filter. Default is false.
+    #[arg(long, default_value_t = false)]
+    no_update_bloom_filter: bool,
 
     /// If this is true, we keep the input intact, but we add an annotation to each document that
     /// explains which spans from the text would have been deleted.
@@ -455,7 +455,7 @@ fn main() {
                 bloom_filter,
                 args.max_ngram_size,
                 args.min_ngram_size,
-                args.update_bloom_filter,
+                !args.no_update_bloom_filter,
                 args.filtering_threshold,
                 args.annotate_only,
                 args.whole_document
@@ -464,7 +464,7 @@ fn main() {
     }
     threadpool.join();
 
-    if args.update_bloom_filter {
+    if !args.no_update_bloom_filter {
         println!("Writing bloom filter to {:?}...", args.bloom_filter_file);
         bloom_filter.write_to_file(&args.bloom_filter_file).unwrap();
         println!("Bloom filter written.");
