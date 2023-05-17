@@ -7,7 +7,7 @@ use std::hash::{BuildHasher, Hash, Hasher};
 use std::mem::size_of;
 use std::sync::Arc;
 use clap::Parser;
-use flate2::read::GzDecoder;
+use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
 use serde_json;
 use unicode_segmentation::UnicodeSegmentation;
@@ -310,7 +310,7 @@ fn process_file(
         open(input_file)?;
     let reader = BufReader::with_capacity(
         1024 * 1024,
-        GzDecoder::new(input_file));
+        MultiGzDecoder::new(input_file));
 
     let output_file = OpenOptions::new().
         read(false).
