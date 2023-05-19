@@ -78,6 +78,11 @@ struct Args {
     #[arg(long, default_value_t = false)]
     whole_document: bool,
 
+    /// If you want to always match whole paragraphs instead of ngrams, set this to true.
+    /// Paragraphs smaller than min_ngram_size will still be excluded.
+    #[arg(long, default_value_t = false)]
+    whole_paragraphs: bool,
+
     /// The number of threads to use for processing.
     /// If this is 0, the number of threads is automatically determined.
     #[arg(long, short = 't', default_value_t = 0)]
@@ -302,6 +307,7 @@ fn process_file(
     annotate_only: bool,
     annotate_attribute_only: bool,
     whole_document: bool,
+    whole_paragraphs: bool,
 ) -> Result <(), io::Error> {
     let input_file = OpenOptions::new().
         read(true).
@@ -349,7 +355,8 @@ fn process_file(
             let mut ngram: VecDeque<&str> = VecDeque::with_capacity(max_ngram_size);
             for token in tokenize(paragraph) {
                 ngram.push_back(token);
-                if ngram.len() >= max_ngram_size {
+                // If not hashing whole paragraphs, add ngrams to the bloom filter as they reach max size
+                if !whole_paragraphs && ngram.len() >= max_ngram_size {
                     hashes.push(bloom_filter.hashes(&ngram));
                     ngram.pop_front();
                 }
@@ -489,7 +496,8 @@ fn main() {
                 args.filtering_threshold,
                 args.annotate_only,
                 args.annotate_attribute_only,
-                args.whole_document
+                args.whole_document,
+                args.whole_paragraphs
             ).unwrap();
         });
     }
