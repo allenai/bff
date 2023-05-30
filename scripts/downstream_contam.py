@@ -46,7 +46,9 @@ def process_training_file(filename):
     with smart_open.open(os.path.join(args.out_dir, os.path.basename(filename)), 'w') as out:
         for doc in data:
             doc_lines = get_lines_set([doc])
-            if len(doc_lines.intersection(eval_lines)) / len(eval_lines) > args.contam_threshold:
+            if len(doc_lines.intersection(eval_lines)) / len(eval_lines) > (0.0 if args.any_contam else args.contam_threshold):
+                doc['contaminated_ratio'] = len(doc_lines.intersection(eval_lines)) / len(eval_lines)
+                doc['contaminated_lines'] = list(doc_lines.intersection(eval_lines))
                 out.write(json.dumps(doc) + "\n")
                 contaminatated_ids.append(doc["id"])
     return contaminatated_ids
@@ -77,6 +79,7 @@ if __name__ == "__main__":
     parser.add_argument("--train_files", type=str, nargs="+", help="training data")
     parser.add_argument("--out_dir", type=str, help="directory to write output shards")
     parser.add_argument("--contam_threshold", type=float, default=0.8, help="fraction of lines in eval set that must be in a single training document to be marked as contaminated")
+    parser.add_argument("--any_contam", action="store_true", help="if set, any contamination will be marked, not just those that are above the threshold")
     parser.add_argument("--num_processes", type=int, default=mp.cpu_count(), help="number of processes to use")
     
     args = parser.parse_args()
