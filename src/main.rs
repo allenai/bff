@@ -83,6 +83,14 @@ struct Args {
     #[arg(long, default_value_t = false)]
     whole_paragraphs: bool,
 
+    /// Ignore case when comparing ngrams.
+    #[arg(long, default_value_t = false)]
+    normalize_capitalization: bool,
+
+    /// Ignore punctuation when comparing ngrams.
+    #[arg(long, default_value_t = false)]
+    ignore_punctuation: bool,
+
     /// The number of threads to use for processing.
     /// If this is 0, the number of threads is automatically determined.
     #[arg(long, short = 't', default_value_t = 0)]
@@ -308,6 +316,8 @@ fn process_file(
     annotate_attribute_only: bool,
     whole_document: bool,
     whole_paragraphs: bool,
+    normalize_capitalization: bool,
+    ignore_punctuation: bool,
 ) -> Result <(), io::Error> {
     let input_file = OpenOptions::new().
         read(true).
@@ -332,6 +342,16 @@ fn process_file(
         let line = line.unwrap();
         let mut data: Value = serde_json::from_str(&line).unwrap();
         let text = data["text"].as_str().unwrap();
+
+        if normalize_capitalization {
+            let text = text.to_lowercase();
+            let text = text.as_str();
+        }
+
+        if ignore_punctuation {
+            let text = text.replace(|c: char| c.is_ascii_punctuation(), "");
+            let text = text.as_str();
+        }
 
         let newlines = if whole_document {
             vec![0, text.len()]
@@ -497,7 +517,9 @@ fn main() {
                 args.annotate_only,
                 args.annotate_attribute_only,
                 args.whole_document,
-                args.whole_paragraphs
+                args.whole_paragraphs,
+                args.normalize_capitalization,
+                args.ignore_punctuation
             ).unwrap();
         });
     }
