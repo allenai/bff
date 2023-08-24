@@ -59,11 +59,11 @@ target/release/bff \
   --bloom-filter-size 274877906944 \
   --expected-ngram-count 1000000000 \
   --output-directory deduped/ \
-  --filtering-threshold 0.0 \
+  --filtering-threshold 1.0 \
   my_test_set.json.gz
 ```
 
-This will produce no output in the `deduped/` directory, but it will produce a filter that you can use afterwards.
+This will copy the output unchanged to the `deduped/` directory, but it will also produce a filter that you can use afterwards.
 It is important that you still take a good guess at the ngram count you expect to see when you do the actual
 deduplication.
 The parameters of the bloom filter are baked in when you first create the file, so you have to guess right the
