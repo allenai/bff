@@ -1,25 +1,24 @@
-use std::collections::VecDeque;
-use std::fs::OpenOptions;
-use std::io;
-use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::path::PathBuf;
-use std::hash::{BuildHasher, Hash, Hasher};
-use std::mem::size_of;
-use std::sync::Arc;
 use clap::Parser;
 use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
-use serde_json;
-use unicode_segmentation::UnicodeSegmentation;
-use rand::Rng;
+use std::collections::VecDeque;
+use std::fs::OpenOptions;
+use std::hash::{BuildHasher, Hash, Hasher};
+use std::io;
+use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::mem::size_of;
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use ahash::RandomState;
 use byteorder::{LittleEndian, NativeEndian, ReadBytesExt, WriteBytesExt};
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::thread::{available_parallelism};
 use flate2::Compression;
+use rand::Rng;
 use serde_json::Value;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::thread::available_parallelism;
 use threadpool::ThreadPool;
-
+use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -113,7 +112,7 @@ fn tokenize(s: &str) -> impl Iterator<Item = &str> {
 struct BloomFilter {
     bits: Vec<AtomicU32>,
     hash_builder_seeds: Vec<[u64; 4]>, // RandomState does not store its seeds, so we have to store them ourselves.
-    hash_builders: Vec<RandomState>
+    hash_builders: Vec<RandomState>,
 }
 
 impl BloomFilter {
@@ -127,7 +126,11 @@ impl BloomFilter {
         k.ceil() as usize
     }
 
-    fn prob_of_false_positive(size_in_bytes: usize, expected_elements: usize, num_hashers: usize) -> f64 {
+    fn prob_of_false_positive(
+        size_in_bytes: usize,
+        expected_elements: usize,
+        num_hashers: usize,
+    ) -> f64 {
         let k = num_hashers as f64;
         let m = (size_in_bytes * 8) as f64;
         let n = expected_elements as f64;
@@ -135,12 +138,14 @@ impl BloomFilter {
     }
 
     fn suggest_size_in_bytes(expected_elements: usize) -> usize {
-        let mut size_in_bytes = 1024*1024;
-        while size_in_bytes < usize::MAX/2 && Self::prob_of_false_positive(
-            size_in_bytes,
-            expected_elements,
-            Self::optimal_number_of_hashers(size_in_bytes, expected_elements)
-        ) > 0.01 {
+        let mut size_in_bytes = 1024 * 1024;
+        while size_in_bytes < usize::MAX / 2
+            && Self::prob_of_false_positive(
+                size_in_bytes,
+                expected_elements,
+                Self::optimal_number_of_hashers(size_in_bytes, expected_elements),
+            ) > 0.01
+        {
             size_in_bytes *= 2;
         }
         size_in_bytes
@@ -150,7 +155,8 @@ impl BloomFilter {
         Self::prob_of_false_positive(
             self.size_in_bytes(),
             expected_elements,
-            self.hash_builders.len())
+            self.hash_builders.len(),
+        )
     }
 
     fn size_in_bytes(&self) -> usize {
@@ -164,10 +170,8 @@ impl BloomFilter {
         for _ in 0..num_hashers {
             let seeds = rng.gen::<[u64; 4]>();
             hash_builders.push(RandomState::with_seeds(
-                seeds[0],
-                seeds[1],
-                seeds[2],
-                seeds[3]));
+                seeds[0], seeds[1], seeds[2], seeds[3],
+            ));
             hash_builder_seeds.push(seeds);
         }
 
@@ -178,7 +182,11 @@ impl BloomFilter {
             bits.push(AtomicU32::new(0));
         }
 
-        Self { bits, hash_builder_seeds, hash_builders }
+        Self {
+            bits,
+            hash_builder_seeds,
+            hash_builders,
+        }
     }
 
     fn from_file(path: &PathBuf) -> io::Result<Self> {
@@ -196,7 +204,10 @@ impl BloomFilter {
 
         let version: u32 = stream.read_u32::<LittleEndian>()?;
         if version != Self::VERSION {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid version"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid version",
+            ));
         }
 
         let num_hashers: u32 = stream.read_u32::<LittleEndian>()?;
@@ -210,10 +221,8 @@ impl BloomFilter {
                 stream.read_u64::<LittleEndian>()?,
             ];
             hash_builders.push(RandomState::with_seeds(
-                seeds[0],
-                seeds[1],
-                seeds[2],
-                seeds[3]));
+                seeds[0], seeds[1], seeds[2], seeds[3],
+            ));
             hash_builder_seeds.push(seeds);
         }
 
@@ -224,7 +233,11 @@ impl BloomFilter {
             bits.push(AtomicU32::new(stream.read_u32::<NativeEndian>()?));
         }
 
-        Ok(Self { bits, hash_builder_seeds, hash_builders })
+        Ok(Self {
+            bits,
+            hash_builder_seeds,
+            hash_builders,
+        })
     }
 
     fn write_to_file(&self, path: &PathBuf) -> io::Result<()> {
@@ -248,7 +261,8 @@ impl BloomFilter {
         unsafe {
             let bytes: &[u8] = std::slice::from_raw_parts(
                 self.bits.as_ptr() as *const u8,
-                self.bits.len() * size_of::<AtomicU32>());
+                self.bits.len() * size_of::<AtomicU32>(),
+            );
             stream.write_all(bytes)?;
         };
 
@@ -256,11 +270,14 @@ impl BloomFilter {
     }
 
     fn hashes(&self, s: &VecDeque<&str>) -> Vec<u64> {
-        self.hash_builders.iter().map(|hash_builder| {
-            let mut hasher = hash_builder.build_hasher();
-            s.hash(&mut hasher);
-            hasher.finish()
-        }).collect()
+        self.hash_builders
+            .iter()
+            .map(|hash_builder| {
+                let mut hasher = hash_builder.build_hasher();
+                s.hash(&mut hasher);
+                hasher.finish()
+            })
+            .collect()
     }
 
     fn insert_hashes(&self, hashes: &Vec<u64>) {
@@ -272,6 +289,7 @@ impl BloomFilter {
         }
     }
 
+    #[allow(dead_code)] // use in unit test
     fn insert(&self, s: &VecDeque<&str>) {
         let hashes = self.hashes(s);
         self.insert_hashes(&hashes);
@@ -287,15 +305,17 @@ impl BloomFilter {
             }
         }
 
-        return true;
+        true
     }
 
+    #[allow(dead_code)] // use in unit test
     fn contains(&self, s: &VecDeque<&str>) -> bool {
         let hashes = self.hashes(s);
         self.contains_hashes(&hashes)
     }
 }
 
+#[allow(clippy::too_many_arguments)] // TODO : abstract parameters into a struct
 fn process_file(
     input_file: &PathBuf,
     output_file: &PathBuf,
@@ -308,25 +328,24 @@ fn process_file(
     annotate_attribute_only: bool,
     whole_document: bool,
     whole_paragraphs: bool,
-) -> Result <(), io::Error> {
-    let input_file = OpenOptions::new().
-        read(true).
-        write(false).
-        create(false).
-        open(input_file)?;
-    let reader = BufReader::with_capacity(
-        1024 * 1024,
-        MultiGzDecoder::new(input_file));
+) -> Result<(), io::Error> {
+    let input_file = OpenOptions::new()
+        .read(true)
+        .write(false)
+        .create(false)
+        .open(input_file)?;
+    let reader = BufReader::with_capacity(1024 * 1024, MultiGzDecoder::new(input_file));
 
-    let output_file = OpenOptions::new().
-        read(false).
-        write(true).
-        create(true).
-        truncate(true).
-        open(output_file)?;
+    let output_file = OpenOptions::new()
+        .read(false)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(output_file)?;
     let mut writer = BufWriter::with_capacity(
         1024 * 1024,
-        GzEncoder::new(output_file, Compression::default()));
+        GzEncoder::new(output_file, Compression::default()),
+    );
 
     for line in reader.lines() {
         let line = line.unwrap();
@@ -338,7 +357,7 @@ fn process_file(
         } else {
             let mut newlines = Vec::new();
             newlines.push(0);
-            for i in text.match_indices("\n") {
+            for i in text.match_indices('\n') {
                 newlines.push(i.0);
             }
             newlines.push(text.len());
@@ -367,9 +386,10 @@ fn process_file(
                 hashes.push(bloom_filter.hashes(&ngram));
             }
 
-            let contained_ngrams = hashes.iter().filter(|ngram| {
-                bloom_filter.contains_hashes(ngram)
-            }).count();
+            let contained_ngrams = hashes
+                .iter()
+                .filter(|ngram| bloom_filter.contains_hashes(ngram))
+                .count();
             total_contained_ngrams += contained_ngrams;
 
             // calculate how many ngrams are in the bloom filter
@@ -390,7 +410,8 @@ fn process_file(
         // if annotate_attribute_only or annotate_only, add the annotation to the json
         if annotate_attribute_only || annotate_only {
             data["bff_duplicate_spans"] = serde_json::to_value(windows_to_remove).unwrap();
-            data["bff_contained_ngram_count"] = serde_json::to_value(total_contained_ngrams).unwrap();
+            data["bff_contained_ngram_count"] =
+                serde_json::to_value(total_contained_ngrams).unwrap();
         } else {
             let mut output_paragraphs = String::new();
             let mut last_end = 0;
@@ -400,7 +421,8 @@ fn process_file(
             }
             output_paragraphs.push_str(&text[last_end..]);
             data["text"] = Value::String(output_paragraphs);
-            data["bff_contained_ngram_count_before_dedupe"] = serde_json::to_value(total_contained_ngrams).unwrap();
+            data["bff_contained_ngram_count_before_dedupe"] =
+                serde_json::to_value(total_contained_ngrams).unwrap();
         }
 
         if annotate_attribute_only {
@@ -423,7 +445,6 @@ fn process_file(
                     map.remove(&key);
                 }
             }
-
         }
 
         serde_json::to_writer(&mut writer, &data)?;
@@ -448,40 +469,42 @@ fn main() {
         println!("Creating new bloom filter...");
         let num_hashers = BloomFilter::optimal_number_of_hashers(
             args.bloom_filter_size,
-            args.expected_ngram_count);
+            args.expected_ngram_count,
+        );
         BloomFilter::new(args.bloom_filter_size, num_hashers)
     };
     let bloom_filter = Arc::new(bloom_filter);
     println!(
         "Bloom filter loaded. ({} hashers)",
-        bloom_filter.hash_builders.len());
+        bloom_filter.hash_builders.len()
+    );
 
     let p = bloom_filter.my_prob_of_false_positive(args.expected_ngram_count);
     if p >= 0.5 {
         println!(
             "WARNING: Probability of a false positive after {} elements is {}.",
-            args.expected_ngram_count,
-            p);
+            args.expected_ngram_count, p
+        );
     } else {
         println!(
             "Probability of a false positive after {} elements: {}",
-            args.expected_ngram_count,
-            p);
+            args.expected_ngram_count, p
+        );
     }
 
-    let suggested_size =
-        BloomFilter::suggest_size_in_bytes(args.expected_ngram_count);
+    let suggested_size = BloomFilter::suggest_size_in_bytes(args.expected_ngram_count);
     if suggested_size * 2 < bloom_filter.size_in_bytes() {
         println!(
             "WARNING: Your bloom filter is more than twice as large as suggested for {} elements. \
             This is good for accuracy, but it is much slower, and likely not worth the trade-off.",
-            args.expected_ngram_count);
+            args.expected_ngram_count
+        );
     }
 
     let threadpool = ThreadPool::new(threads);
     for input in args.inputs {
         let mut output = args.output_directory.clone();
-        output.push(&input.file_name().unwrap());
+        output.push(input.file_name().unwrap());
         let bloom_filter = bloom_filter.clone();
 
         threadpool.execute(move || {
@@ -497,8 +520,9 @@ fn main() {
                 args.annotate_only,
                 args.annotate_attribute_only,
                 args.whole_document,
-                args.whole_paragraphs
-            ).unwrap();
+                args.whole_paragraphs,
+            )
+            .unwrap();
         });
     }
     threadpool.join();
