@@ -436,15 +436,9 @@ fn process_file(
 
             // Iterate through the keys of the JSON object and remove any field that is not in the allowed_fields list
             if let Value::Object(ref mut map) = data {
-                let keys_to_remove: Vec<String> = map
-                    .keys()
-                    .filter(|key| !allowed_fields.contains(&key.as_str()))
-                    .cloned()
-                    .collect();
-                for key in keys_to_remove {
-                    map.remove(&key);
+                map.retain(|key, _| allowed_fields.contains(&key.as_str()));
                 }
-            }
+            
         }
 
         serde_json::to_writer(&mut writer, &data)?;
