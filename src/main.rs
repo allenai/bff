@@ -1,6 +1,12 @@
+use ahash::RandomState;
+use byteorder::{LittleEndian, NativeEndian, ReadBytesExt, WriteBytesExt};
 use clap::Parser;
 use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
+use flate2::Compression;
+use rand::Rng;
+use serde_json::Value;
+use std::clone::Clone;
 use std::collections::VecDeque;
 use std::fs::OpenOptions;
 use std::hash::{BuildHasher, Hash, Hasher};
@@ -8,14 +14,8 @@ use std::io;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::mem::size_of;
 use std::path::PathBuf;
-use std::sync::Arc;
-
-use ahash::RandomState;
-use byteorder::{LittleEndian, NativeEndian, ReadBytesExt, WriteBytesExt};
-use flate2::Compression;
-use rand::Rng;
-use serde_json::Value;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::thread::available_parallelism;
 use threadpool::ThreadPool;
 use unicode_segmentation::UnicodeSegmentation;
@@ -116,7 +116,7 @@ struct BloomFilter {
 }
 
 impl BloomFilter {
-    const MAGIC: u32 = 0x81F0F117;
+    const MAGIC: u32 = 0x81F0_F117;
     const VERSION: u32 = 1;
 
     fn optimal_number_of_hashers(size_in_bytes: usize, expected_elements: usize) -> usize {
@@ -260,7 +260,7 @@ impl BloomFilter {
         stream.write_u64::<LittleEndian>(self.bits.len() as u64)?;
         unsafe {
             let bytes: &[u8] = std::slice::from_raw_parts(
-                self.bits.as_ptr() as *const u8,
+                self.bits.as_ptr().cast::<u8>(),
                 self.bits.len() * size_of::<AtomicU32>(),
             );
             stream.write_all(bytes)?;
@@ -319,7 +319,7 @@ impl BloomFilter {
 fn process_file(
     input_file: &PathBuf,
     output_file: &PathBuf,
-    bloom_filter: Arc<BloomFilter>,
+    bloom_filter: &Arc<BloomFilter>,
     max_ngram_size: usize,
     min_ngram_size: usize,
     update_bloom_filter: bool,
@@ -439,7 +439,7 @@ fn process_file(
                 let keys_to_remove: Vec<String> = map
                     .keys()
                     .filter(|key| !allowed_fields.contains(&key.as_str()))
-                    .map(|key| key.to_owned())
+                    .cloned()
                     .collect();
                 for key in keys_to_remove {
                     map.remove(&key);
@@ -508,11 +508,11 @@ fn main() {
         let bloom_filter = bloom_filter.clone();
 
         threadpool.execute(move || {
-            println!("Processing {:?}...", input);
+            println!("Processing {input:?}...");
             process_file(
                 &input,
                 &output,
-                bloom_filter,
+                &bloom_filter,
                 args.max_ngram_size,
                 args.min_ngram_size,
                 !args.no_update_bloom_filter,
