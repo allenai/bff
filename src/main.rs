@@ -175,12 +175,11 @@ impl BloomFilter {
             hash_builder_seeds.push(seeds);
         }
 
-        let mut bits = Vec::new();
         let number_of_u32 = size_in_bytes / size_of::<AtomicU32>();
-        bits.reserve_exact(number_of_u32);
-        for _ in 0..number_of_u32 {
-            bits.push(AtomicU32::new(0));
-        }
+        let mut bits = {
+            (0..number_of_u32).map(|_| AtomicU32::default()).collect()
+        };
+
 
         Self {
             bits,
