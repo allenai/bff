@@ -15,10 +15,14 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::mem::size_of;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc,Mutex};
 use std::thread::available_parallelism;
+use std::time::Instant;
 use threadpool::ThreadPool;
 use unicode_segmentation::UnicodeSegmentation;
+use indicatif::{ProgressBar,ProgressStyle};
+
+
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -327,6 +331,7 @@ fn process_file(
     annotate_attribute_only: bool,
     whole_document: bool,
     whole_paragraphs: bool,
+    pbar: Arc<Mutex<ProgressBar>>
 ) -> Result<(), io::Error> {
     let input_file = OpenOptions::new()
         .read(true)
@@ -443,7 +448,7 @@ fn process_file(
         serde_json::to_writer(&mut writer, &data)?;
         writer.write_all(b"\n")?;
     }
-
+    pbar.lock().unwrap().inc(1);  // increment progress bar
     Ok(())
 }
 
@@ -455,6 +460,7 @@ fn main() {
         args.threads
     };
 
+    let now = Instant::now();
     let bloom_filter = if args.bloom_filter_file.exists() {
         println!("Loading bloom filter from {:?}...", args.bloom_filter_file);
         BloomFilter::from_file(&args.bloom_filter_file).unwrap()
@@ -468,8 +474,8 @@ fn main() {
     };
     let bloom_filter = Arc::new(bloom_filter);
     println!(
-        "Bloom filter loaded. ({} hashers)",
-        bloom_filter.hash_builders.len()
+        "Bloom filter loaded. ({} hashers) ({} ms)",
+        bloom_filter.hash_builders.len(), now.elapsed().as_millis()
     );
 
     let p = bloom_filter.my_prob_of_false_positive(args.expected_ngram_count);
@@ -494,14 +500,29 @@ fn main() {
         );
     }
 
+    // Build Progress bar (do some hacky arc/mutex wrapping)
+    let num_files = args.inputs.len() as u64;
+
+    let pbar = ProgressBar::new(num_files)
+        .with_style(
+            ProgressStyle::with_template(
+                "Files {human_pos}/{human_len} [{elapsed_precise}/{duration_precise}] [{wide_bar:.cyan/blue}]",
+            ).unwrap()
+        );
+    //let pbar = ProgressBar::new(num_files);
+    let now = Instant::now();
+    //pbar.set_style(ProgressStyle::with_template(
+    //    "[{elapsed_precise}] {wide_bar:0.cyan/blue} [{pos:>7}/{len:7} {eta}]").unwrap());
+    let pbar = Arc::new(Mutex::new(pbar));
+
     let threadpool = ThreadPool::new(threads);
     for input in args.inputs {
         let mut output = args.output_directory.clone();
         output.push(input.file_name().unwrap());
         let bloom_filter = bloom_filter.clone();
-
+        let pbar = pbar.clone();
         threadpool.execute(move || {
-            println!("Processing {input:?}...");
+            // println!("Processing {input:?}..."); // Commenting out so ProgressBar works more cleanly
             process_file(
                 &input,
                 &output,
@@ -514,12 +535,13 @@ fn main() {
                 args.annotate_attribute_only,
                 args.whole_document,
                 args.whole_paragraphs,
+                pbar,
             )
             .unwrap();
         });
     }
     threadpool.join();
-
+    println!("Processed {} files in {} s", num_files, now.elapsed().as_secs());
     if !args.no_update_bloom_filter {
         println!("Writing bloom filter to {:?}...", args.bloom_filter_file);
         bloom_filter.write_to_file(&args.bloom_filter_file).unwrap();

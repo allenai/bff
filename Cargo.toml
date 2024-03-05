@@ -14,3 +14,4 @@ rand = "0.8.4"
 ahash = { version = "0.8.1", features = ["runtime-rng"] }
 byteorder = "1"
 threadpool = "1.8.1"
+indicatif = "*"
