@@ -1,9 +1,13 @@
 use ahash::RandomState;
+use anyhow::{anyhow, Result};
 use byteorder::{LittleEndian, NativeEndian, ReadBytesExt, WriteBytesExt};
 use clap::Parser;
 use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
+use glob::glob;
+use human_bytes::human_bytes;
+use indicatif::{ProgressBar,ProgressStyle};
 use rand::Rng;
 use serde_json::Value;
 use std::clone::Clone;
@@ -15,10 +19,15 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::mem::size_of;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Instant};
 use std::thread::available_parallelism;
+use sysinfo::{
+    System,
+};
 use threadpool::ThreadPool;
 use unicode_segmentation::UnicodeSegmentation;
+
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -27,8 +36,16 @@ struct Args {
 
     /// The size of the bloom filter in bytes. If the filter already exists, this parameter is
     /// ignored.
-    #[arg(long)]
+    /// If ==0 this _requires_ that fp_rate is > 0
+    #[arg(long, default_value_t=0)]
     bloom_filter_size: usize,
+
+    /// The desired per-ngram false positive rate. If bloom_filter_size is not specified, this MUST 
+    /// be specified, and the filter size will be computed using this FP rate and optimal number of 
+    /// hashers. Maxes out at 90% of system RAM
+    #[arg(long, default_value_t=0.01)]
+    fp_rate: f64,
+
 
     /// The number of expected ngrams. This is used to calculate the optimal number of hashers.
     /// If the filter already exists, this parameter is ignored.
@@ -58,6 +75,12 @@ struct Args {
     /// the input is still deduplicated based on the filter. Default is false.
     #[arg(long, default_value_t = false)]
     no_update_bloom_filter: bool,
+
+    /// Whether or not to save the bloom filter at the end. Defaults to false (i.e., saves the bloom filter)
+    /// If this is True, the bloom filter will NOT be saved, regardless of what no_update_bloom_filter suggests
+    #[arg(long, default_value_t = false)]
+    no_save_bloom_filter: bool,
+
 
     /// If this is true, we keep the input intact, but we add an annotation to each document that
     /// explains which spans from the text would have been deleted.
@@ -315,6 +338,62 @@ impl BloomFilter {
     }
 }
 
+
+
+fn compute_bloom_size(fp_rate: f64, expected_ngram_count: usize) -> usize {
+    /* Uses binary search to find optimal size of bloom filter using optimal number of hashers
+       and provided ngram counts
+    */
+    // compute 90% of system ram 
+    let mut sys = System::new_all();
+    sys.refresh_all();
+
+
+    let mut lo = 1 as usize;
+    let mut hi = ((sys.total_memory() as f64) * 0.9) as usize;
+
+    // Save some time by checking endpoint first
+    if BloomFilter::prob_of_false_positive(hi, expected_ngram_count, 
+                                           BloomFilter::optimal_number_of_hashers(hi, expected_ngram_count)) > fp_rate {
+        return hi;
+    }
+
+    // Then do binary search to find optimal size
+    while lo < hi-1 { // -1 here because binsearch powers of 2 scare me 
+        let mid = lo + (hi - lo) / 2;
+        let num_hashers = BloomFilter::optimal_number_of_hashers(mid, expected_ngram_count);
+        let computed_fp = BloomFilter::prob_of_false_positive(mid, expected_ngram_count, num_hashers) ;
+        if computed_fp > fp_rate {
+            // FP rate too high, need to go bigger
+            lo =  mid + 1;
+        } else {
+            // FP rate too low, can make bloom filter smaller
+            hi = mid -1;
+        }
+    }
+    hi
+}
+
+
+fn expand_dirs(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let mut files = vec![];
+    for path in paths {
+        if path.is_dir() {
+            let path_str = path
+                .to_str()
+                .ok_or_else(|| anyhow!("invalid path '{}'", path.to_string_lossy()))?;
+            for entry in glob(&format!("{}/**/*.json*.gz", path_str))? {
+                files.push(entry?.to_path_buf());
+            }
+        } else {
+            files.push(path.clone());
+        }
+    }
+
+    Ok(files)
+}
+
+
 #[allow(clippy::too_many_arguments)] // TODO : abstract parameters into a struct
 fn process_file(
     input_file: &PathBuf,
@@ -328,6 +407,7 @@ fn process_file(
     annotate_attribute_only: bool,
     whole_document: bool,
     whole_paragraphs: bool,
+    pbar: &Arc<Mutex<ProgressBar>>,
 ) -> Result<(), io::Error> {
     let input_file = OpenOptions::new()
         .read(true)
@@ -444,33 +524,41 @@ fn process_file(
         serde_json::to_writer(&mut writer, &data)?;
         writer.write_all(b"\n")?;
     }
-
+    pbar.lock().unwrap().inc(1);
     Ok(())
 }
 
 fn main() {
     let args = Args::parse();
+    let inputs = expand_dirs(&args.inputs).unwrap();
+    println!("Parsed {:?} input files...", inputs.len());
     let threads = if args.threads == 0 {
         available_parallelism().unwrap().get()
     } else {
         args.threads
     };
 
+
+    let now = Instant::now();
+    let mut bloom_filter_size = args.bloom_filter_size;
     let bloom_filter = if args.bloom_filter_file.exists() {
         println!("Loading bloom filter from {:?}...", args.bloom_filter_file);
         BloomFilter::from_file(&args.bloom_filter_file).unwrap()
     } else {
         println!("Creating new bloom filter...");
+        if args.bloom_filter_size == 0 {
+            bloom_filter_size = compute_bloom_size(args.fp_rate, args.expected_ngram_count);
+        }
         let num_hashers = BloomFilter::optimal_number_of_hashers(
-            args.bloom_filter_size,
+            bloom_filter_size,
             args.expected_ngram_count,
         );
-        BloomFilter::new(args.bloom_filter_size, num_hashers)
+        BloomFilter::new(bloom_filter_size, num_hashers)
     };
     let bloom_filter = Arc::new(bloom_filter);
     println!(
-        "Bloom filter loaded. ({} hashers)",
-        bloom_filter.hash_builders.len()
+        "\t...Bloom filter loaded. ({} hashers) ({} seconds)",
+        bloom_filter.hash_builders.len(), now.elapsed().as_secs()
     );
 
     let p = bloom_filter.my_prob_of_false_positive(args.expected_ngram_count);
@@ -487,6 +575,8 @@ fn main() {
     }
 
     let suggested_size = BloomFilter::suggest_size_in_bytes(args.expected_ngram_count);
+    println!("Suggested size is {} | Actual size is {} ", 
+             human_bytes(suggested_size as f64), human_bytes(bloom_filter.size_in_bytes() as f64));
     if suggested_size * 2 < bloom_filter.size_in_bytes() {
         println!(
             "WARNING: Your bloom filter is more than twice as large as suggested for {} elements. \
@@ -494,15 +584,31 @@ fn main() {
             args.expected_ngram_count
         );
     }
+    // Build Progress bar (do some hacky arc/mutex wrapping)
+    let num_files = inputs.len() as u64;
+
+    let pbar = ProgressBar::new(num_files)
+        .with_style(
+            ProgressStyle::with_template(
+                "Files {human_pos}/{human_len} [{elapsed_precise}/{duration_precise}] [{wide_bar:.cyan/blue}]",
+            ).unwrap()
+        );
+    pbar.inc(0);
+    //let pbar = ProgressBar::new(num_files);
+    let now = Instant::now();
+    //pbar.set_style(ProgressStyle::with_template(
+    //    "[{elapsed_precise}] {wide_bar:0.cyan/blue} [{pos:>7}/{len:7} {eta}]").unwrap());
+    let pbar = Arc::new(Mutex::new(pbar));
 
     let threadpool = ThreadPool::new(threads);
-    for input in args.inputs {
+    for input in inputs {
         let mut output = args.output_directory.clone();
         output.push(input.file_name().unwrap());
         let bloom_filter = bloom_filter.clone();
+        let pbar = pbar.clone();
 
         threadpool.execute(move || {
-            println!("Processing {input:?}...");
+            //println!("Processing {input:?}...");
             process_file(
                 &input,
                 &output,
@@ -515,13 +621,14 @@ fn main() {
                 args.annotate_attribute_only,
                 args.whole_document,
                 args.whole_paragraphs,
+                &pbar
             )
             .unwrap();
         });
     }
     threadpool.join();
-
-    if !args.no_update_bloom_filter {
+    println!("Completed deduplication in {} seconds", now.elapsed().as_secs());
+    if (!args.no_update_bloom_filter) && (!args.no_save_bloom_filter) {
         println!("Writing bloom filter to {:?}...", args.bloom_filter_file);
         bloom_filter.write_to_file(&args.bloom_filter_file).unwrap();
         println!("Bloom filter written.");
