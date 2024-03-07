@@ -355,11 +355,14 @@ fn compute_bloom_size(fp_rate: f64, expected_ngram_count: usize) -> usize {
     // Save some time by checking endpoint first
     if BloomFilter::prob_of_false_positive(hi, expected_ngram_count, 
                                            BloomFilter::optimal_number_of_hashers(hi, expected_ngram_count)) > fp_rate {
+        println!(
+            "WARNING: To achieve desired false-positive rate, you'd need >90% of system RAM. Defaulting to 90% \
+            system RAM.");
         return hi;
     }
 
     // Then do binary search to find optimal size
-    while lo < hi-1 { // -1 here because binsearch powers of 2 scare me 
+    while lo < hi-1 {
         let mid = lo + (hi - lo) / 2;
         let num_hashers = BloomFilter::optimal_number_of_hashers(mid, expected_ngram_count);
         let computed_fp = BloomFilter::prob_of_false_positive(mid, expected_ngram_count, num_hashers) ;
@@ -593,13 +596,11 @@ fn main() {
                 "Files {human_pos}/{human_len} [{elapsed_precise}/{duration_precise}] [{wide_bar:.cyan/blue}]",
             ).unwrap()
         );
-    pbar.inc(0);
-    //let pbar = ProgressBar::new(num_files);
-    let now = Instant::now();
-    //pbar.set_style(ProgressStyle::with_template(
-    //    "[{elapsed_precise}] {wide_bar:0.cyan/blue} [{pos:>7}/{len:7} {eta}]").unwrap());
+    pbar.inc(0);  // initalizes pbar
     let pbar = Arc::new(Mutex::new(pbar));
 
+
+    let now = Instant::now();
     let threadpool = ThreadPool::new(threads);
     for input in inputs {
         let mut output = args.output_directory.clone();
@@ -608,7 +609,6 @@ fn main() {
         let pbar = pbar.clone();
 
         threadpool.execute(move || {
-            //println!("Processing {input:?}...");
             process_file(
                 &input,
                 &output,
