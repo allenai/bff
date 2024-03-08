@@ -105,6 +105,11 @@ struct Args {
     #[arg(long, default_value_t = false)]
     whole_paragraphs: bool,
 
+    /// If you don't want to include the progress bar, set this to true.
+    /// Will print out filenames as they get processed if this is true
+    #[arg(long, default_value_t = false)]
+    no_progress: bool,
+
     /// The number of threads to use for processing.
     /// If this is 0, the number of threads is automatically determined.
     #[arg(long, short = 't', default_value_t = 0)]
@@ -411,6 +416,7 @@ fn process_file(
     whole_document: bool,
     whole_paragraphs: bool,
     pbar: &Arc<Mutex<ProgressBar>>,
+    no_progress: bool,
 ) -> Result<(), io::Error> {
     let input_file = OpenOptions::new()
         .read(true)
@@ -527,7 +533,9 @@ fn process_file(
         serde_json::to_writer(&mut writer, &data)?;
         writer.write_all(b"\n")?;
     }
-    pbar.lock().unwrap().inc(1);
+    if !no_progress {
+        pbar.lock().unwrap().inc(1);
+    }
     Ok(())
 }
 
@@ -596,8 +604,10 @@ fn main() {
                 "Files {human_pos}/{human_len} [{elapsed_precise}/{duration_precise}] [{wide_bar:.cyan/blue}]",
             ).unwrap()
         );
-    pbar.inc(0);  // initalizes pbar
     let pbar = Arc::new(Mutex::new(pbar));
+    if !args.no_progress {
+        pbar.lock().unwrap().inc(0);  // initalizes pbar
+    }
 
 
     let now = Instant::now();
@@ -609,6 +619,10 @@ fn main() {
         let pbar = pbar.clone();
 
         threadpool.execute(move || {
+            if args.no_progress {
+                println!("Processing {input:?}...");
+
+            }
             process_file(
                 &input,
                 &output,
@@ -621,7 +635,8 @@ fn main() {
                 args.annotate_attribute_only,
                 args.whole_document,
                 args.whole_paragraphs,
-                &pbar
+                &pbar,
+                args.no_progress,
             )
             .unwrap();
         });
