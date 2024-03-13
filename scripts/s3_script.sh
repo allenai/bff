@@ -9,6 +9,8 @@
 #4. Upload back to S3
 #
 
+
+expected_ngrams="-1"
 # Parse the named arguments
 while [[ $# -gt 0 ]]; do
     key="$1"
@@ -29,6 +31,17 @@ while [[ $# -gt 0 ]]; do
             shift
             shift
             ;;
+        -fp|--fp-rate)
+            fp_rate="$2"
+            shift
+            shift
+            ;;
+        --tok|--tokens)
+            exepected_ngrams="$2"
+            shift
+            shift 
+            ;;
+
         *)
             echo "Unknown option: $key"
             exit 1
@@ -53,36 +66,23 @@ aws s3 cp $s3_input_dir $input_files --recursive
 # =======================================================
 
 # Use wimbd to get total tokens
-wimbd_stats=$(wimbd stats $input_files/*.jsonl.gz)
-
-total_tokens=$(echo "$wimbd_stats" | grep "^total tokens" | sed 's/^total tokens: //' | tr -d ',')
-total_documents=$(echo "$wimbd_stats" | grep "^total documents" | sed 's/^total documents: //' | tr -d ',')
-expected_ngrams=$(( total_tokens-total_documents ))
-
-
-echo "EXPECTED NGRAMS $expected_ngrams"
-
-
-# do os-varying memory count
-if [ "$(uname)" = "Linux" ]; then
-    total_memory=$(free | awk 'NR==2 {print $2}');
+if [ "$expected_ngrams" == "-1"]; then
+    wimbd_stats=$(wimbd stats $input_files/*.jsonl.gz)
+    total_tokens=$(echo "$wimbd_stats" | grep "^total tokens" | sed 's/^total tokens: //' | tr -d ',')
+    total_documents=$(echo "$wimbd_stats" | grep "^total documents" | sed 's/^total documents: //' | tr -d ',')
+    expected_ngrams=$(( total_tokens-total_documents ))
 fi
 
-# For macOS
-if [ "$(uname)"="Darwin" ]; then
-    total_memory=$(sysctl -n hw.memsize)
-fi
+echo "BFF ARGS"
+echo "FP RATE $fp_rate"
+echo "NGRAMS $expected_ngrams"
 
-bloom_filter_size=$(( total_memory * 1 / 100 ))
-bloom_filter_size=${bloom_filter_size%.*}
-
-echo "FILTER $bloom_filter_size"
 
 # ======================================================
 # =           Actually run bff                         =
 # ======================================================
-target/release/bff --bloom-filter-file filter.bff --bloom-filter-size $bloom_filter_size --expected-ngram-count $expected_ngrams --output-directory $output_files $input_files/*.jsonl.gz
-
+rm -f filter.bff # Always rebuilds the filter froms scratch 
+target/release/bff --bloom-filter-file filter.bff --bloom-filter-size $bloom_filter_size --expected-ngram-count $expected_ngrams --output-directory $output_files $input_files
 
 # ==================================================
 # =           And then upload back to S3           =

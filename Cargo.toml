@@ -6,6 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+sysinfo="0.30.7"
 clap = { version = "4.1.11", features = ["derive"] }
 flate2 = { version = "1.0", features = ["zlib-ng"], default-features = false }
 serde_json = "1.0"
@@ -14,4 +15,11 @@ rand = "0.8.4"
 ahash = { version = "0.8.1", features = ["runtime-rng"] }
 byteorder = "1"
 threadpool = "1.8.1"
+<<<<<<< HEAD
 indicatif = "*"
+=======
+human_bytes = "0.4.3"
+indicatif = "0.17.8"
+glob = "0.3.1"
+anyhow = "1.0.80"
+>>>>>>> main
