@@ -27,7 +27,6 @@ use sysinfo::{
 };
 use threadpool::ThreadPool;
 use unicode_segmentation::UnicodeSegmentation;
-use indicatif::{ProgressBar,ProgressStyle};
 
 
 

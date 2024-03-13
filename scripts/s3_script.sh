@@ -66,7 +66,9 @@ aws s3 cp $s3_input_dir $input_files --recursive
 # =======================================================
 
 # Use wimbd to get total tokens
-if [ "$expected_ngrams" == "-1"]; then
+echo "PRENGR, $expected_ngrams"
+if [ "$expected_ngrams" == "-1" ]; then
+    echo "IN THIS BLOCK"
     wimbd_stats=$(wimbd stats $input_files/*.jsonl.gz)
     total_tokens=$(echo "$wimbd_stats" | grep "^total tokens" | sed 's/^total tokens: //' | tr -d ',')
     total_documents=$(echo "$wimbd_stats" | grep "^total documents" | sed 's/^total documents: //' | tr -d ',')
@@ -82,7 +84,7 @@ echo "NGRAMS $expected_ngrams"
 # =           Actually run bff                         =
 # ======================================================
 rm -f filter.bff # Always rebuilds the filter froms scratch 
-target/release/bff --bloom-filter-file filter.bff --bloom-filter-size $bloom_filter_size --expected-ngram-count $expected_ngrams --output-directory $output_files $input_files
+target/release/bff --bloom-filter-file filter.bff --expected-ngram-count $expected_ngrams --output-directory $output_files $input_files
 
 # ==================================================
 # =           And then upload back to S3           =
