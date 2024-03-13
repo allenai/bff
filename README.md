@@ -62,9 +62,6 @@ target/release/bff \
   input_dir/
 ```
 
-Each input file will run in its own thread, and the filter will be shared between them.
-In the end, as before the filter will be written to disk.
-
 
 ### Pre-load the filter
 
