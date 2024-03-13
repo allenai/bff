@@ -415,8 +415,7 @@ fn process_file(
     annotate_attribute_only: bool,
     whole_document: bool,
     whole_paragraphs: bool,
-    pbar: &Arc<Mutex<ProgressBar>>,
-    no_progress: bool,
+    pbar_option: &Option<Arc<Mutex<ProgressBar>>>,
 ) -> Result<(), io::Error> {
     let input_file = OpenOptions::new()
         .read(true)
@@ -533,9 +532,11 @@ fn process_file(
         serde_json::to_writer(&mut writer, &data)?;
         writer.write_all(b"\n")?;
     }
-    if !no_progress {
-        pbar.lock().unwrap().inc(1);
+    match pbar_option {
+        Some(pbar) => pbar.lock().unwrap().inc(1),
+        None => (),
     }
+
     Ok(())
 }
 
@@ -605,9 +606,12 @@ fn main() {
             ).unwrap()
         );
     let pbar = Arc::new(Mutex::new(pbar));
+
+
     if !args.no_progress {
-        pbar.lock().unwrap().inc(0);  // initalizes pbar
+        pbar.lock().unwrap().inc(0); // initializes pbar
     }
+
 
 
     let now = Instant::now();
@@ -616,12 +620,16 @@ fn main() {
         let mut output = args.output_directory.clone();
         output.push(input.file_name().unwrap());
         let bloom_filter = bloom_filter.clone();
-        let pbar = pbar.clone();
+
+        let pbar_option: Option<Arc<Mutex<ProgressBar>>> = if args.no_progress {
+            None
+        } else {
+            Some(pbar.clone())
+        };
 
         threadpool.execute(move || {
             if args.no_progress {
                 println!("Processing {input:?}...");
-
             }
             process_file(
                 &input,
@@ -635,8 +643,7 @@ fn main() {
                 args.annotate_attribute_only,
                 args.whole_document,
                 args.whole_paragraphs,
-                &pbar,
-                args.no_progress,
+                &pbar_option,
             )
             .unwrap();
         });

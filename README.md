@@ -44,11 +44,27 @@ target/release/bff \
   --bloom-filter-size 274877906944 \
   --expected-ngram-count 1000000000 \
   --output-directory deduped/ \
-  *.json.gz
+  *.json.gz # Can also pass a directory containing .json.gz files here
 ```
 
 Each input file will run in its own thread, and the filter will be shared between them.
 In the end, as before the filter will be written to disk.
+
+### Automatically choosing filter size
+To automatically compute the size of the filter, you can instead specify a false-positive rate. `bff` will create a bloom filter to attain that false positive rate, up to 90% of the system RAM.  Note that false positive rate is per token-ngram, so the chance of a whole paragraph/document being marked as a false-positive will actually be quite less than the specified `fp-rate`:
+
+```bash
+target/release/bff \
+  --bloom-filter-file filter.bff \
+  --fp-rate 0.01 \
+  --expected-ngram-count 1000000000 \
+  --output-directory deduped/ \
+  input_dir/
+```
+
+Each input file will run in its own thread, and the filter will be shared between them.
+In the end, as before the filter will be written to disk.
+
 
 ### Pre-load the filter
 
